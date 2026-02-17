@@ -1,5 +1,4 @@
-"""
-Excel I/O helpers.
+"""Excel I/O helpers.
 
 Reads input addresses from an Excel workbook and writes the fully
 populated output back to a new workbook.
@@ -60,6 +59,12 @@ def read_input(filepath: str | Path) -> list[AddressInput]:
     filepath = Path(filepath)
     if not filepath.exists():
         raise FileNotFoundError(f"Input file not found: {filepath}")
+
+    if filepath.suffix.lower() not in (".xlsx", ".xls"):
+        raise ValueError(
+            f"Input file must be an Excel file (.xlsx or .xls), "
+            f"got: '{filepath.suffix}' ({filepath.name})"
+        )
 
     logger.info("Reading input file: %s", filepath)
     df = pd.read_excel(filepath, dtype=str)
@@ -129,7 +134,7 @@ def write_output(
     Returns:
         Resolved Path of the written file.
     """
-    filepath = Path(filepath)
+    filepath = Path(filepath).resolve()
     filepath.parent.mkdir(parents=True, exist_ok=True)
 
     records = []

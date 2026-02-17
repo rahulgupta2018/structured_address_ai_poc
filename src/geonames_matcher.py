@@ -11,16 +11,16 @@ import logging
 
 from rapidfuzz import fuzz, process
 
-from src.config import (
+from .config import (
     CONFIDENCE_EXACT_ALTERNATE,
     CONFIDENCE_EXACT_PRIMARY,
     CONFIDENCE_LLM_FUZZY_CONFIRMED,
     FUZZY_AMBIGUITY_MARGIN,
     FUZZY_MATCH_THRESHOLD,
 )
-from src.geonames_loader import GeoNamesIndex
-from src.preprocess import normalize_for_matching
-from src.schemas import GeoNamesMatch
+from .geonames_loader import GeoNamesIndex
+from .preprocess import normalize_for_matching, redact_pii
+from .schemas import GeoNamesMatch
 
 logger = logging.getLogger(__name__)
 
@@ -159,7 +159,7 @@ def match_fuzzy(
     if top_score < FUZZY_MATCH_THRESHOLD:
         logger.debug(
             "LLM fuzzy re-validation below threshold: '%s' best='%s' score=%.1f",
-            norm, top_name, top_score,
+            redact_pii(norm), redact_pii(top_name), top_score,
         )
         return GeoNamesMatch(matched=False)
 
@@ -189,13 +189,13 @@ def match_fuzzy(
 
         logger.debug(
             "LLM fuzzy disambiguated via raw address: '%s' (overlap=%d tokens)",
-            winner_name, best_overlap,
+            redact_pii(winner_name), best_overlap,
         )
     else:
         # Ambiguous with no raw address to disambiguate
         logger.debug(
             "LLM fuzzy re-validation ambiguous: '%s' — %d tied candidates",
-            norm, len(tied),
+            redact_pii(norm), len(tied),
         )
         return GeoNamesMatch(matched=False)
 
@@ -208,7 +208,7 @@ def match_fuzzy(
 
     logger.info(
         "LLM fuzzy re-validation matched: '%s' → '%s' (score=%.1f, id=%d)",
-        town_candidate, best.name, top_score, best.geonames_id,
+        redact_pii(town_candidate), redact_pii(best.name), top_score, best.geonames_id,
     )
 
     return GeoNamesMatch(

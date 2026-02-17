@@ -22,6 +22,7 @@ from .schemas import (
     Status,
 )
 from .parser_libpostal import ParseResult
+from .preprocess import redact_pii
 
 logger = logging.getLogger(__name__)
 
@@ -74,7 +75,7 @@ def decide(
         )
         logger.debug(
             "Row validated via libpostal: town=%s confidence=%.2f",
-            output.town,
+            redact_pii(output.town),
             output.confidence_score,
         )
         return output
@@ -89,7 +90,7 @@ def decide(
         )
         logger.debug(
             "Row validated via scan: town=%s confidence=%.2f",
-            output.town,
+            redact_pii(output.town),
             output.confidence_score,
         )
         return output
@@ -108,7 +109,7 @@ def decide(
             output.confidence_score = config.CONFIDENCE_LLM_CONFIRMED
             logger.debug(
                 "Row validated via LLM+GeoNames: town=%s confidence=%.2f",
-                output.town,
+                redact_pii(output.town),
                 output.confidence_score,
             )
             return output
@@ -124,7 +125,7 @@ def decide(
             output.warnings.append("geonames_no_match")
             logger.debug(
                 "Row needs_review (LLM unverified): town=%s",
-                output.town,
+                redact_pii(output.town),
             )
             return output
 

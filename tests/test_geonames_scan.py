@@ -65,7 +65,7 @@ def _build_scan_index() -> GeoNamesIndex:
             index.country_names[cc] = set()
 
         for name in [city.name, city.ascii_name] + city.alternate_names:
-            norm = name.strip().lower()
+            norm = normalize_for_matching(name)
             if norm:
                 index.country_names[cc].add(norm)
                 if norm not in index.by_country[cc]:

@@ -13,9 +13,6 @@ from unidecode import unidecode
 
 # Pre-compiled patterns
 _WHITESPACE_RE = re.compile(r"\s+")
-_PUNCTUATION_NORMALIZE_RE = re.compile(
-    r"[\uff0c\uff0e\uff1a\uff1b\u3001\u3002]"  # CJK full-width punctuation
-)
 
 
 def normalize_unicode(text: str) -> str:
@@ -99,3 +96,22 @@ def extract_ngrams(tokens: list[str], min_n: int = 1, max_n: int = 4) -> list[st
         for i in range(len(tokens) - n + 1):
             ngrams.append(" ".join(tokens[i : i + n]))
     return ngrams
+
+
+# ── PII redaction ────────────────────────────────────────────────────────────
+
+def redact_pii(text: str | None, keep_chars: int = 5) -> str:
+    """
+    Redact a string for safe logging, preserving the first few characters.
+
+    Examples:
+        "Marienplatz 1, München"  →  "Marie…[redacted]"
+        None                      →  "<empty>"
+        ""                        →  "<empty>"
+    """
+    if not text or not text.strip():
+        return "<empty>"
+    text = text.strip()
+    if len(text) <= keep_chars:
+        return text + "…"
+    return text[:keep_chars] + "…[redacted]"

@@ -7,6 +7,10 @@ build/
 .eggs/
 *.egg
 
+# Environment files
+.env
+.env.*
+
 # Virtual environments
 .venv/
 venv/

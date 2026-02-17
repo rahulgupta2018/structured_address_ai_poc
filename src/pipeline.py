@@ -77,7 +77,7 @@ def run(
 
     # ── Process each row ─────────────────────────────────────────────────
     results: list[AddressOutput] = []
-    llm_queue: list[tuple[int, AddressInput, AddressOutput, Optional[ParseResult]]] = []
+    llm_queue: list[tuple[int, AddressInput, AddressOutput, Optional[ParseResult], str]] = []
 
     for idx, inp in enumerate(inputs):
         output = AddressOutput.from_input(inp)

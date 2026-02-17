@@ -15,14 +15,14 @@ from typing import Optional
 
 from rapidfuzz import fuzz, process
 
-from src.config import (
+from .config import (
     CONFIDENCE_FUZZY_SCAN,
     FUZZY_AMBIGUITY_MARGIN,
     FUZZY_MATCH_THRESHOLD,
 )
-from src.geonames_loader import GeoNamesIndex
-from src.preprocess import extract_ngrams, normalize_for_matching, tokenize
-from src.schemas import GeoNamesMatch
+from .geonames_loader import GeoNamesIndex
+from .preprocess import extract_ngrams, normalize_for_matching, tokenize
+from .schemas import GeoNamesMatch
 
 logger = logging.getLogger(__name__)
 

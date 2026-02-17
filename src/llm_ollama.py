@@ -15,6 +15,7 @@ from typing import Optional
 import requests
 
 from . import config
+from .preprocess import redact_pii
 from .schemas import LLMResponse
 
 logger = logging.getLogger(__name__)
@@ -158,9 +159,9 @@ def _parse_llm_response(raw_text: str) -> LLMResponse:
             try:
                 data = json.loads(text[start:end])
             except json.JSONDecodeError:
-                raise ValueError(f"Cannot parse LLM response as JSON: {raw_text[:200]}")
+                raise ValueError(f"Cannot parse LLM response as JSON: {redact_pii(raw_text, keep_chars=20)}")
         else:
-            raise ValueError(f"No JSON object found in LLM response: {raw_text[:200]}")
+            raise ValueError(f"No JSON object found in LLM response: {redact_pii(raw_text, keep_chars=20)}")
 
     return LLMResponse(
         town_candidate=data.get("town_candidate"),

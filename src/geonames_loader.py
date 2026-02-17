@@ -12,7 +12,7 @@ import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from src.preprocess import normalize_for_matching
+from .preprocess import normalize_for_matching
 
 logger = logging.getLogger(__name__)
 

@@ -15,7 +15,25 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
+from . import config
 from .pipeline import run
+
+
+def _validate_output_path(output_path: str | None) -> str | None:
+    """Ensure the output path stays within the project directory."""
+    if output_path is None:
+        return None
+    resolved = Path(output_path).resolve()
+    try:
+        resolved.relative_to(config.PROJECT_ROOT)
+    except ValueError:
+        print(
+            f"❌ Output path must be within the project directory "
+            f"({config.PROJECT_ROOT}), got: {resolved}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    return str(resolved)
 
 
 def main() -> None:
@@ -68,9 +86,10 @@ def main() -> None:
     logging.getLogger().addHandler(file_handler)
 
     try:
+        validated_output = _validate_output_path(args.output)
         results = run(
             input_path=args.input,
-            output_path=args.output,
+            output_path=validated_output,
             skip_llm=args.skip_llm,
         )
         validated = sum(1 for r in results if r.status.value == "validated")

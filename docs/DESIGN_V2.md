@@ -50,15 +50,15 @@ Scale from **13 rows** to **millions of rows per day** while:
 
 | Aspect | POC (v1.2) | Production (v2) |
 |--------|------------|-----------------|
-| Scale | 13 rows, single file | Millions/day, streaming + batch |
-| Data format | Excel in/out | Excel, CSV, JSON, API, message queue |
-| GeoNames | In-memory dict (~400MB) | PostgreSQL + Redis cache |
+| Scale | 13 rows, single file | Millions/day, batch processing |
+| Data format | Excel in/out | CSV batches (primary), Excel, API |
+| GeoNames | In-memory dict (~400MB) | Cloud SQL (PostgreSQL) + Memorystore (Redis) cache |
 | Disambiguation | Population tiebreak only | Postal code + admin1 + contextual signals |
-| LLM | Local Ollama, 4 threads | Managed LLM service (Azure OpenAI / Bedrock), async with circuit breaker |
+| LLM | Local Ollama, 4 threads | Vertex AI / Cloud-hosted LLM, async with circuit breaker |
 | Mismatch detection | None | Country-code vs. address content cross-validation |
-| Deployment | CLI script | Containerized microservices (K8s) |
-| Monitoring | Log files | OpenTelemetry + Prometheus + Grafana |
-| Storage | File system | PostgreSQL + S3/Blob for audit |
+| Deployment | CLI script | GCP Dataflow (batch) + Cloud Run (API) + GKE (workers) |
+| Monitoring | Log files | Cloud Monitoring + OpenTelemetry + Grafana |
+| Storage | File system | Cloud SQL + GCS for audit |
 
 ---
 
@@ -83,7 +83,7 @@ Scale from **13 rows** to **millions of rows per day** while:
 | **No disambiguation** | Population-based tiebreak only; no postal code or admin1 matching | ~1% silent wrong picks (e.g., wrong Springfield) → compliance risk |
 | **Sequential file processing** | Single-threaded row loop; LLM concurrency within batch only | Cannot process millions of rows in acceptable time |
 | **In-memory GeoNames** | 400MB RAM for cities1000.txt | Cannot scale to allCountries.txt filtered; no shared cache across workers |
-| **No retry/dead-letter for LLM** | Row marked `needs_review` on LLM failure, no re-processing | Lost opportunities; human review queue grows unnecessarily |
+| **No retry mechanism for LLM** | Row marked `needs_review` on LLM failure, no re-processing | Lost opportunities; human review queue grows unnecessarily |
 | **Excel-only I/O** | `openpyxl` is slow for large files | Not viable for millions of rows |
 | **No audit trail persistence** | Results only in output file | Cannot query historical results, track accuracy over time |
 
@@ -96,7 +96,7 @@ Scale from **13 rows** to **millions of rows per day** while:
 | ID | Requirement | Priority |
 |----|-------------|----------|
 | FR-01 | Process ≥ 5 million addresses per day | P0 |
-| FR-02 | Support input via API, CSV, Excel, and message queue | P0 |
+| FR-02 | Support input via CSV batch files (primary), API, and Excel | P0 |
 | FR-03 | Achieve ≥ 90% auto-validation rate on well-formed input | P0 |
 | FR-04 | Detect and flag country-code mismatches | P0 |
 | FR-05 | Disambiguate same-name cities using postal code + admin hierarchy | P0 |
@@ -104,7 +104,7 @@ Scale from **13 rows** to **millions of rows per day** while:
 | FR-07 | Support incremental re-processing of failed/reviewed rows | P1 |
 | FR-08 | Maintain full audit trail for every row (input → decision → output) | P0 |
 | FR-09 | Support GeoNames dataset versioning and hot-reload | P1 |
-| FR-10 | Support configurable LLM providers (Azure OpenAI, Bedrock, local Ollama) | P1 |
+| FR-10 | Support configurable LLM providers (Vertex AI, Azure OpenAI, local Ollama) | P1 |
 
 ### 3.2 Non-Functional Requirements
 
@@ -113,11 +113,11 @@ Scale from **13 rows** to **millions of rows per day** while:
 | NFR-01 | p95 latency — deterministic path | < 500ms |
 | NFR-02 | p95 latency — LLM path | < 5s |
 | NFR-03 | Availability | 99.9% (3-nines) |
-| NFR-04 | Horizontal scalability | Auto-scale 2–20 workers based on queue depth |
+| NFR-04 | Horizontal scalability | Auto-scale Dataflow workers based on batch size; Cloud Run scales on request volume |
 | NFR-05 | Data retention | 7 years (regulatory compliance) |
 | NFR-06 | PII handling | Encrypt at rest, redact in logs, GDPR-compliant |
 | NFR-07 | Recovery time objective (RTO) | < 15 minutes |
-| NFR-08 | Recovery point objective (RPO) | 0 (no data loss — persistent queue) |
+| NFR-08 | Recovery point objective (RPO) | 0 (no data loss — GCS staging + checkpointed Dataflow jobs) |
 
 ---
 
@@ -125,45 +125,62 @@ Scale from **13 rows** to **millions of rows per day** while:
 
 ### 4.1 High-Level Architecture
 
+The production system uses two processing paths:
+- **Batch path** (primary): CSV files processed via GCP Dataflow (Apache Beam) for high-volume daily runs
+- **API path** (secondary): Cloud Run service for real-time / small-batch requests
+
 ```
-                    ┌──────────────────────────────────────┐
-                    │          Ingestion Layer              │
-                    │  (API Gateway / File Watcher / MQ)    │
-                    └──────────────┬───────────────────────┘
-                                   │
-                    ┌──────────────▼───────────────────────┐
-                    │         Message Queue (Kafka/SQS)     │
-                    │   Topic: address.raw                  │
-                    └──────────────┬───────────────────────┘
-                                   │
-              ┌────────────────────┼────────────────────┐
-              │                    │                     │
-     ┌────────▼────────┐ ┌────────▼────────┐ ┌─────────▼───────┐
-     │  Worker Pod 1   │ │  Worker Pod 2   │ │  Worker Pod N   │
-     │                 │ │                 │ │                 │
-     │ ┌─────────────┐ │ │ ┌─────────────┐ │ │ ┌─────────────┐ │
-     │ │ Preprocessor │ │ │ │ Preprocessor │ │ │ │ Preprocessor │ │
-     │ │ libpostal    │ │ │ │ libpostal    │ │ │ │ libpostal    │ │
-     │ │ GeoNames     │ │ │ │ GeoNames     │ │ │ │ GeoNames     │ │
-     │ │ Disambiguator│ │ │ │ Disambiguator│ │ │ │ Disambiguator│ │
-     │ │ Decision Eng │ │ │ │ Decision Eng │ │ │ │ Decision Eng │ │
-     │ └─────────────┘ │ │ └─────────────┘ │ │ └─────────────┘ │
-     └────────┬────────┘ └────────┬────────┘ └─────────┬───────┘
-              │                    │                     │
-              └────────────────────┼─────────────────────┘
-                                   │
-              ┌────────────────────┼────────────────────┐
-              │                    │                     │
-     ┌────────▼────────┐ ┌────────▼────────┐ ┌─────────▼───────┐
-     │   Redis Cache   │ │   PostgreSQL    │ │  LLM Service    │
-     │ (GeoNames +     │ │ (Audit trail +  │ │ (Azure OpenAI / │
-     │  Postal codes)  │ │  Results + Jobs)│ │  Circuit Breaker)│
-     └─────────────────┘ └─────────────────┘ └─────────────────┘
+                     ┌───────────────────────────────────────┐
+                     │          Ingestion Layer               │
+                     │  CSV Upload → GCS   /   REST API      │
+                     └──────────┬──────────────┬─────────────┘
+                                │              │
+              ┌─────────────────▼──────┐  ┌────▼──────────────┐
+              │   GCS Bucket           │  │  Cloud Run (API)  │
+              │   gs://address-input/   │  │  FastAPI          │
+              │   ├── batch_20260217/  │  │  (≤ 1000 rows     │
+              │   │   └── chunk_*.csv  │  │   sync processing)│
+              │   └── manifest.json    │  └────┬──────────────┘
+              └─────────────┬──────────┘       │
+                            │                  │
+              ┌─────────────▼──────────┐       │
+              │  GCP Dataflow Job       │       │
+              │  (Apache Beam Pipeline) │       │
+              │                         │       │
+              │  ┌───────────────────┐  │       │
+              │  │ ReadFromCSV       │  │       │
+              │  │ Preprocess        │  │       │
+              │  │ libpostal Parse   │  │       │
+              │  │ PostalCodeLookup  │  │       │
+              │  │ GeoNames Match    │  │       │
+              │  │ Disambiguate      │  │       │
+              │  │ MismatchDetect    │  │       │
+              │  │ LLM Fallback      │  │       │
+              │  │ Re-Validate       │  │       │
+              │  │ Decision Engine   │  │       │
+              │  │ WriteResults      │  │       │
+              │  └───────────────────┘  │       │
+              │                         │       │
+              │  Auto-scales workers    │       │
+              │  based on data volume   │       │
+              └────────────┬────────────┘       │
+                           │                    │
+              ┌────────────┼────────────────────┼─────────┐
+              │            │                    │         │
+     ┌────────▼────────┐ ┌─▼────────────────┐ ┌─▼───────────────┐
+     │  Memorystore    │ │  Cloud SQL       │ │  LLM Service    │
+     │  (Redis)        │ │  (PostgreSQL)    │ │  (Vertex AI /   │
+     │  GeoNames cache │ │  Audit trail +   │ │   Circuit       │
+     │  + Postal codes │ │  Results + Jobs  │ │   Breaker)      │
+     └─────────────────┘ └─────────────────┘  └─────────────────┘
                                    │
                     ┌──────────────▼───────────────────────┐
                     │         Output Layer                  │
-                    │  Topic: address.resolved              │
-                    │  + API / S3 / Excel export            │
+                    │  GCS: gs://address-output/            │
+                    │  ├── results_*.csv                    │
+                    │  ├── needs_review_*.csv               │
+                    │  └── audit_*.json                     │
+                    │  + Cloud SQL (queryable results)      │
                     └──────────────────────────────────────┘
 ```
 
@@ -171,13 +188,13 @@ Scale from **13 rows** to **millions of rows per day** while:
 
 | Component | Responsibility |
 |-----------|---------------|
-| **Ingestion Layer** | Accept input from REST API, file upload (CSV/Excel), or message queue. Validate schema, assign job ID, enqueue. |
-| **Message Queue** | Decouple ingestion from processing. Enable backpressure, replay, and dead-letter routing. |
-| **Worker Pods** | Stateless processing units running the full pipeline. Scale horizontally. Each pod has libpostal loaded. |
-| **Redis Cache** | Shared GeoNames lookup cache + postal code mappings. Eliminates per-worker memory duplication. |
-| **PostgreSQL** | Persistent storage for job metadata, row-level audit trail, disambiguation caches, and review queue. |
-| **LLM Service** | Managed or self-hosted LLM with circuit breaker, rate limiting, and fallback providers. |
-| **Output Layer** | Publish resolved addresses to downstream topic, S3 archive, or synchronous API response. |
+| **GCS (Input)** | Landing zone for CSV batch files. Supports manifest files for multi-file batches. Triggers Dataflow via Cloud Function or Cloud Scheduler. |
+| **GCP Dataflow** | Distributed batch processing engine (Apache Beam). Auto-scales workers based on data volume. Handles parallelism, checkpointing, and fault tolerance natively. |
+| **Cloud Run (API)** | Lightweight REST API for real-time / small-batch requests (≤ 1,000 rows). Runs the same pipeline logic synchronously. |
+| **Memorystore (Redis)** | Shared GeoNames lookup cache + postal code mappings. Eliminates per-worker memory duplication. Accessible from Dataflow workers and Cloud Run. |
+| **Cloud SQL (PostgreSQL)** | Persistent storage for job metadata, row-level audit trail, disambiguation caches, and review queue. |
+| **LLM Service** | Vertex AI or managed LLM with circuit breaker, rate limiting, and fallback providers. |
+| **GCS (Output)** | Resolved CSV files, needs_review extracts, and audit JSON logs. Downstream systems consume from output bucket. |
 
 ---
 
@@ -306,7 +323,7 @@ CREATE INDEX idx_postal_cc_prefix ON postal_codes (country_code, substr(postal_c
 ### Pipeline Flow Diagram
 
 ```
-Message Queue (address.raw)
+CSV Batch (from GCS) or API Request
   │
   ├─ Step 0: Schema Validation & Preprocessing
   │     ├─ Validate input schema (Pydantic v2)
@@ -340,28 +357,35 @@ Message Queue (address.raw)
   │     └─ Confidence adjustment for mismatch-corrected rows
   │
   ├─ Step 5: GeoNames Raw-Address Scan (Enhanced)
-  │     ├─ Same as POC but with disambiguation context
+  │     ├─ Scan full raw address against country-filtered city lexicon
+  │     │     (POC: in-memory n-gram exact + rapidfuzz token_set_ratio,
+  │     │      longest match preferred, ambiguity margin filtering)
+  │     ├─ v2 enhancement: disambiguation context passed to resolve ties
   │     ├─ Fuzzy match with pg_trgm (database-level, not in-process)
   │     ├─ match → ✅ validated (source=geonames_scan)
-  │     └─ no match → LLM queue
+  │     └─ no match → LLM fallback
   │
   ├─ Step 6: LLM Fallback (Enhanced)
-  │     ├─ Async via managed service (Azure OpenAI / Bedrock)
+  │     ├─ Via managed LLM service (Vertex AI / Azure OpenAI)
   │     ├─ Circuit breaker pattern (fail-fast if service degraded)
   │     ├─ Enriched prompt with postal code context + mismatch warnings
-  │     └─ Dead-letter queue for persistent failures
+  │     └─ Failed rows written to retry CSV for re-processing
   │
   ├─ Step 7: Final Re-Validation (Enhanced)
-  │     ├─ Exact + fuzzy re-validation (same as POC)
-  │     ├─ Disambiguation applied to LLM result
+  │     ├─ Re-validate LLM's town_candidate against GeoNames:
+  │     │     1. Exact match (normalized name vs country-scoped lexicon)
+  │     │     2. If no exact → fuzzy match (rapidfuzz token_set_ratio ≥ 80,
+  │     │        ambiguity margin filtering, population tiebreak)
+  │     ├─ v2 enhancement: disambiguation signals applied to LLM result
   │     ├─ match → ✅ validated (source=llm)
   │     ├─ town present but no match → ⚠️ needs_review
   │     └─ no town → ❌ rejected
   │
-  └─ Step 8: Persist & Publish
-        ├─ Write to PostgreSQL (audit trail)
-        ├─ Publish to address.resolved topic
-        └─ Update job progress
+  └─ Step 8: Persist & Output
+        ├─ Write to Cloud SQL (audit trail)
+        ├─ Write results CSV to GCS output bucket
+        ├─ Write needs_review rows to separate CSV
+        └─ Update job progress in Cloud SQL
 
 ```
 
@@ -374,8 +398,8 @@ Message Queue (address.raw)
 | Step 3 | Population tiebreak | Multi-signal disambiguation | Eliminates silent wrong picks |
 | Step 4 | — (did not exist) | Country-code mismatch detection | Catches 3/5 of POC's `needs_review` rows |
 | Step 5 | In-process fuzzy scan | Database-backed pg_trgm | 10x faster, shared across workers |
-| Step 6 | Local Ollama, sync | Managed LLM, async, circuit breaker | Scalability, reliability |
-| Step 8 | Write Excel file | PostgreSQL + message queue + S3 | Audit, reprocessing, integration |
+| Step 6 | Local Ollama, sync | Managed LLM (Vertex AI), circuit breaker | Scalability, reliability |
+| Step 8 | Write Excel file | Cloud SQL + GCS output CSVs | Audit, reprocessing, integration |
 
 ---
 
@@ -575,8 +599,8 @@ class LLMProvider(Protocol):
 
 | Provider | Use Case | Latency | Cost |
 |----------|----------|---------|------|
-| **Azure OpenAI** (GPT-4o-mini) | Primary production provider | ~1–2s | ~$0.15/1M tokens |
-| **AWS Bedrock** (Claude Haiku) | Secondary / fallback | ~1–2s | ~$0.25/1M tokens |
+| **Vertex AI** (Gemini 1.5 Flash) | Primary production provider | ~1–2s | ~$0.075/1M tokens |
+| **Azure OpenAI** (GPT-4o-mini) | Secondary / fallback | ~1–2s | ~$0.15/1M tokens |
 | **Local Ollama** | Dev/test, air-gapped deployments | ~3–5s | $0 (hardware cost only) |
 
 ### 9.2 Circuit Breaker Pattern
@@ -618,7 +642,7 @@ At scale, LLM costs become significant. Controls:
 | Control | Implementation |
 |---------|---------------|
 | **Deterministic-first** | Same as POC — only unresolved rows hit LLM |
-| **Prompt caching** | Azure OpenAI prompt caching for identical system prompts |
+| **Prompt caching** | Vertex AI context caching for identical system prompts |
 | **Response caching** | Cache LLM responses by `(normalized_address, country_code)` hash in Redis (TTL: 30d) |
 | **Batch API** | Use OpenAI Batch API for non-real-time workloads (50% cost reduction) |
 | **Token budget** | Per-hour token budget with automatic throttling |
@@ -660,7 +684,7 @@ This gives the LLM **far more context** than the POC, reducing hallucination ris
 
 CREATE TABLE jobs (
     job_id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    source          VARCHAR(50) NOT NULL,          -- 'api', 'file_upload', 'mq'
+    source          VARCHAR(50) NOT NULL,          -- 'api', 'file_upload', 'dataflow'
     input_file      TEXT,                           -- original filename (if file upload)
     total_rows      INT NOT NULL,
     processed_rows  INT DEFAULT 0,
@@ -791,7 +815,7 @@ CREATE TABLE geonames_versions (
 );
 ```
 
-### 10.2 S3/Blob Storage
+### 10.2 GCS (Cloud Storage)
 
 | Bucket | Content | Retention |
 |--------|---------|-----------|
@@ -812,7 +836,7 @@ POST /api/v2/addresses/validate
   Mode: Synchronous for ≤ 100 rows; async (returns job_id) for > 100
 
 POST /api/v2/jobs
-  Body: { file_url: "s3://...", format: "csv" }
+  Body: { file_url: "gs://address-input/...", format: "csv" }
   Response: { job_id, status: "pending", estimated_time_seconds: 120 }
 
 GET /api/v2/jobs/{job_id}
@@ -831,17 +855,20 @@ POST /api/v2/review/{result_id}
   Response: { review_id, status: "corrected" }
 
 GET /api/v2/health
-  Response: { status, geonames_version, llm_status, queue_depth }
+  Response: { status, geonames_version, llm_status, active_dataflow_jobs }
 ```
 
-### 11.2 Message Queue Topics
+### 11.2 Batch Processing Model
 
-| Topic | Direction | Schema |
-|-------|-----------|--------|
-| `address.raw` | Ingestion → Workers | `{ job_id, row_index, address_1, address_2, address_3, country_code }` |
-| `address.resolved` | Workers → Output | `{ job_id, row_index, town, status, confidence, ... }` |
-| `address.llm` | Workers → LLM Pool | `{ job_id, row_index, prompt, context }` |
-| `address.dlq` | LLM Pool → Dead Letter | Failed LLM calls for retry/investigation |
+Batch processing is the primary ingestion path. Files are uploaded to GCS and processed by GCP Dataflow.
+
+| Stage | Component | Description |
+|-------|-----------|-------------|
+| **Upload** | GCS trigger / Cloud Scheduler | CSV files land in `gs://address-input/`. Cloud Function triggers Dataflow job or scheduled via Cloud Scheduler. |
+| **Processing** | GCP Dataflow (Apache Beam) | Distributed pipeline: `ReadFromText` → `ParseCSV` → `ProcessAddress` (ParDo) → `WriteResults`. Auto-scales workers. |
+| **Output** | GCS + Cloud SQL | Results CSV written to `gs://address-output/`. Row-level results persisted to Cloud SQL. |
+| **Retry** | Retry CSV | Failed rows (LLM timeout, transient errors) written to a retry file for re-processing in next batch. |
+| **Monitoring** | Cloud Monitoring | Job progress, worker count, and error rates tracked via Dataflow metrics. |
 
 ---
 
@@ -851,47 +878,46 @@ GET /api/v2/health
 
 | Stage | POC Speed | v2 Target | How |
 |-------|-----------|-----------|-----|
-| Preprocessing + libpostal | ~1,000/s per process | ~10,000/s across cluster | 10 worker pods |
+| Preprocessing + libpostal | ~1,000/s per process | ~10,000/s across cluster | 10 Dataflow workers |
 | GeoNames exact match | ~10,000/s (in-memory) | ~50,000/s (Redis cached) | Sub-ms Redis lookup |
 | GeoNames fuzzy scan | ~100–500/s (in-process) | ~5,000/s (pg_trgm) | Database-level trigram index |
-| LLM fallback | ~4–15/s (4 threads) | ~200–500/s (async, pooled) | Managed LLM with high concurrency |
+| LLM fallback | ~4–15/s (4 threads) | ~200–500/s (pooled, concurrent) | Vertex AI with high concurrency |
 | **End-to-end** | ~13 rows in 60s | **~5M rows / day** | Full pipeline |
 
 ### 12.2 Auto-Scaling Policy
 
+**GCP Dataflow (Batch Pipeline):**
+Dataflow automatically manages worker scaling based on data volume:
+
 ```yaml
-# Kubernetes HPA configuration
-apiVersion: autoscaling/v2
-kind: HorizontalPodAutoscaler
-metadata:
-  name: address-worker-hpa
-spec:
-  scaleTargetRef:
-    apiVersion: apps/v1
-    kind: Deployment
-    name: address-worker
-  minReplicas: 2
-  maxReplicas: 20
-  metrics:
-    - type: External
-      external:
-        metric:
-          name: kafka_consumer_lag
-          selector:
-            matchLabels:
-              topic: address.raw
-        target:
-          type: AverageValue
-          averageValue: "1000"    # Scale up when lag > 1000 messages per pod
-    - type: Resource
-      resource:
-        name: cpu
-        target:
-          type: Utilization
-          averageUtilization: 70
+# Dataflow job launch parameters
+worker_machine_type: n1-standard-2
+num_workers: 2                 # Initial workers
+max_num_workers: 20            # Max workers for autoscaling
+autoscaling_algorithm: THROUGHPUT_BASED
+disk_size_gb: 50
+region: us-central1
+network: address-ai-vpc
+subnetwork: regions/us-central1/subnetworks/dataflow-subnet
+
+# Autoscaling behavior:
+# - Dataflow monitors per-step throughput and backlog
+# - Scales up when backlog grows (more data than workers can handle)
+# - Scales down when backlog shrinks
+# - No manual HPA configuration needed
 ```
 
-### 12.3 Worker Pod Resource Profile
+**Cloud Run (API):**
+```yaml
+# Cloud Run autoscaling
+min_instances: 1
+max_instances: 10
+concurrency: 80
+cpu: 2
+memory: 1Gi
+```
+
+### 12.3 Dataflow Worker Resource Profile
 
 | Resource | Request | Limit | Notes |
 |----------|---------|-------|-------|
@@ -899,17 +925,27 @@ spec:
 | Memory | 512MB | 1GB | libpostal model (~200MB) + application |
 | Disk | 500MB | 1GB | libpostal data files |
 
-Note: GeoNames data is **not** loaded into worker memory (it's in PostgreSQL + Redis), so memory per worker is dramatically reduced from the POC's ~400MB overhead.
+Note: GeoNames data is **not** loaded into worker memory (it's in Cloud SQL + Memorystore Redis), so memory per worker is dramatically reduced from the POC's ~400MB overhead.
 
 ### 12.4 Database Sizing
+
+**GeoNames reference tables (already loaded in dev SQLite — will migrate to Cloud SQL):**
 
 | Component | Estimated Size | Notes |
 |-----------|---------------|-------|
 | `geonames_cities` | ~50MB | 166k records |
-| `geonames_city_names` | ~500MB | ~5M name variants (with trigram index) |
-| `geonames_postal_codes` | ~200MB | 2.5M records |
+| `geonames_city_names` | ~500MB | ~5M name variants (with pg_trgm trigram index) |
+| `geonames_postal_codes` | ~200MB | 1.8M records |
+| `geonames_admin1` | < 1MB | 3.8k records |
+
+**Production output tables (created when v2 pipeline goes live):**
+
+| Component | Estimated Size | Notes |
+|-----------|---------------|-------|
 | `address_results` (30 days) | ~10GB | 5M rows/day × 30 days |
-| `address_results` (1 year) | ~120GB | Partition by month |
+| `address_results` (1 year) | ~120GB | Partition by month (see §12.5) |
+| `jobs` | < 1GB | Job metadata — low volume |
+| `review_queue` | < 1GB | Subset of needs_review rows |
 | Redis cache | ~2GB | Hot GeoNames data + LLM response cache |
 
 ### 12.5 PostgreSQL Partitioning
@@ -936,7 +972,7 @@ CREATE TABLE address_results_2026_02 PARTITION OF address_results
 |--------|------|--------|---------|
 | `address_rows_processed_total` | Counter | `status` (validated/review/rejected) | Throughput |
 | `address_processing_duration_seconds` | Histogram | `stage` (preprocess/match/llm/decision) | Latency per stage |
-| `address_pipeline_duration_seconds` | Histogram | `source` (api/file/mq) | End-to-end latency |
+| `address_pipeline_duration_seconds` | Histogram | `source` (api/file/dataflow) | End-to-end latency |
 | `address_geonames_cache_hit_ratio` | Gauge | `cache` (redis/db) | Cache effectiveness |
 | `address_llm_calls_total` | Counter | `provider`, `status` (success/error/timeout) | LLM usage |
 | `address_llm_tokens_total` | Counter | `provider`, `direction` (input/output) | LLM cost tracking |
@@ -944,7 +980,7 @@ CREATE TABLE address_results_2026_02 PARTITION OF address_results
 | `address_disambiguation_method_total` | Counter | `method` (postal/admin1/population) | Disambiguation signal usage |
 | `address_mismatch_detected_total` | Counter | `action` (corrected/flagged) | Country-code issues |
 | `address_review_queue_depth` | Gauge | — | Backlog for human review |
-| `address_queue_lag` | Gauge | `topic` | Kafka consumer lag |
+| `address_dataflow_workers_active` | Gauge | `job_id` | Dataflow worker count |
 
 ### 13.2 Distributed Tracing (OpenTelemetry)
 
@@ -982,7 +1018,7 @@ Trace: job=abc123, row=42
 | **Pipeline Overview** | Throughput (rows/min), Status distribution pie chart, p50/p95/p99 latency, Active jobs |
 | **LLM Performance** | Calls/min, Avg latency, Error rate, Tokens consumed, Cost ($/hr), Circuit breaker state |
 | **Data Quality** | Validation rate trend, Mismatch detection rate, Top review reasons, Disambiguation method distribution |
-| **Infrastructure** | Worker pod count, CPU/memory utilization, Redis hit rate, PostgreSQL query latency, Kafka lag |
+| **Infrastructure** | Dataflow worker count, CPU/memory utilization, Redis hit rate, Cloud SQL query latency, job throughput |
 | **Review Queue** | Pending reviews, Avg review time, Corrections applied, Reviewer throughput |
 
 ---
@@ -993,11 +1029,11 @@ Trace: job=abc123, row=42
 
 | Control | Implementation |
 |---------|---------------|
-| **Encryption at rest** | PostgreSQL: TDE or AWS RDS encryption. S3: AES-256-SSE. Redis: encrypted cluster. |
-| **Encryption in transit** | TLS 1.3 for all inter-service communication. mTLS between pods. |
+| **Encryption at rest** | Cloud SQL: CMEK encryption. GCS: AES-256 server-side. Memorystore Redis: encryption at rest. |
+| **Encryption in transit** | TLS 1.3 for all inter-service communication. VPC-native Dataflow workers. |
 | **PII handling** | Addresses are PII. Redact in all log messages (keep first 5 chars). |
 | **Log sanitization** | `redact_pii()` applied to all structured logging. No raw addresses in logs. |
-| **Access control** | RBAC via K8s service accounts. API authentication via OAuth2 / API keys. |
+| **Access control** | RBAC via GCP IAM + Workload Identity. API authentication via OAuth2 / API keys. |
 | **Data residency** | All processing within designated region. No cross-region data transfer. |
 | **Retention policy** | Results: 7 years (regulatory). Logs: 90 days. Redis cache: 24h TTL. |
 
@@ -1005,7 +1041,7 @@ Trace: job=abc123, row=42
 
 | Control | Implementation |
 |---------|---------------|
-| **No external LLM for sensitive data** | Azure OpenAI with data processing agreement. Or self-hosted Ollama in VPC. |
+| **No external LLM for sensitive data** | Vertex AI with data processing agreement. Or self-hosted Ollama in VPC. |
 | **Prompt injection defence** | Input sanitization before prompt construction. System prompt is immutable. |
 | **Output validation** | LLM output parsed as strict JSON schema. Arbitrary text rejected. |
 | **Token budget limits** | Per-hour and per-day token caps to prevent runaway costs. |
@@ -1037,7 +1073,7 @@ Trace: job=abc123, row=42
 ```
                     ┌──────────┐
                     │  E2E     │  5% — Full pipeline via API
-                    │  Tests   │  (Testcontainers: PG + Redis + Kafka)
+                    │  Tests   │  (Testcontainers: PG + Redis)
                     ├──────────┤
                     │Integration│ 20% — Multi-component tests
                     │  Tests   │  (DB queries, cache, LLM mock)
@@ -1101,9 +1137,8 @@ Run the benchmark after every release as a regression gate:
 │  ┌──────────────────▼───────────────────┐                        │
 │  │  Deployment: worker (2–20 pods, HPA)  │                       │
 │  │  - libpostal loaded per pod           │                       │
-│  │  - Kafka consumer                     │                       │
 │  │  - Pipeline orchestrator              │                       │
-│  │  - Connects to: Redis, PostgreSQL     │                       │
+│  │  - Connects to: Redis, Cloud SQL      │                       │
 │  └──────────────────┬───────────────────┘                        │
 │                     │                                            │
 │  ┌──────────────────▼───────────────────┐                        │
@@ -1130,11 +1165,11 @@ Run the benchmark after every release as a regression gate:
 │  └──────────────────────────────────────┘                        │
 │                                                                  │
 │  External Services:                                              │
-│  ├── PostgreSQL (RDS / CloudSQL)                                 │
-│  ├── Redis Cluster (ElastiCache / Memorystore)                   │
-│  ├── Kafka (MSK / Confluent)                                     │
-│  ├── S3 / Blob Storage (audit archive)                           │
-│  └── Azure OpenAI / AWS Bedrock (LLM)                            │
+│  ├── Cloud SQL (PostgreSQL, HA)                                   │
+│  ├── Memorystore (Redis Cluster)                                  │
+│  ├── GCS (input/output/audit buckets)                             │
+│  ├── GCP Dataflow (batch processing)                              │
+│  └── Vertex AI / Azure OpenAI (LLM)                               │
 │                                                                  │
 └─────────────────────────────────────────────────────────────────┘
 ```
@@ -1165,12 +1200,12 @@ Code Push → GitHub Actions
 
 ### 16.3 Environment Matrix
 
-| Environment | Purpose | GeoNames | LLM Provider | Scale |
-|-------------|---------|----------|--------------|-------|
-| **Local** | Developer workstation | SQLite or in-memory | Ollama (local) | 1 worker |
-| **CI** | Automated tests | Testcontainers PostgreSQL | Mock | 1 worker |
-| **Staging** | Pre-production validation | PostgreSQL (small instance) | Azure OpenAI (dev tier) | 2 workers |
-| **Production** | Live traffic | PostgreSQL (HA cluster) | Azure OpenAI (production) | 2–20 workers |
+| Environment | Purpose | GeoNames | LLM Provider | Processing |
+|-------------|---------|----------|--------------|------------|
+| **Local** | Developer workstation | SQLite or in-memory | Ollama (local) | Single-process Python |
+| **CI** | Automated tests | Testcontainers PostgreSQL | Mock | Single-process Python |
+| **Staging** | Pre-production validation | Cloud SQL (small instance) | Vertex AI (dev tier) | Dataflow (2 workers) |
+| **Production** | Live batch + API | Cloud SQL (HA cluster) | Vertex AI (production) | Dataflow (2–20 workers) + Cloud Run |
 
 ---
 
@@ -1200,26 +1235,27 @@ Code Push → GitHub Actions
 
 **Exit criterion:** Benchmark accuracy ≥ 90%. Mismatch detection catches ≥ 80% of wrong country codes.
 
-### Phase 3: API + Async Processing (Weeks 7–9)
+### Phase 3: API + Batch Processing (Weeks 7–9)
 
 | Task | Deliverable | Risk |
 |------|-------------|------|
-| Build FastAPI application | `api/` module with routes | Low |
-| Set up Kafka topics + consumer | Message queue integration | Medium |
+| Build FastAPI application (Cloud Run) | `api/` module with routes | Low |
+| Build GCP Dataflow pipeline (Apache Beam) | `dataflow/` module with ParDo transforms | Medium |
 | Build job management (create, status, results) | `jobs/` module + DB tables | Medium |
-| Build LLM provider abstraction | `llm/providers/` with Azure + Ollama | Low |
+| Build LLM provider abstraction | `llm/providers/` with Vertex AI + Ollama | Low |
 | Build circuit breaker | `llm/circuit_breaker.py` | Low |
 | Add OpenTelemetry tracing | Distributed tracing across pipeline | Medium |
 
-**Exit criterion:** API accepts batch submissions, processes asynchronously, returns results.
+**Exit criterion:** Dataflow pipeline processes CSV batches end-to-end. API accepts small-batch submissions.
 
 ### Phase 4: Production Hardening (Weeks 10–12)
 
 | Task | Deliverable | Risk |
 |------|-------------|------|
-| Kubernetes manifests + HPA | `k8s/` directory | Medium |
+| Kubernetes manifests + HPA (for API/workers) | `k8s/` directory | Medium |
+| Dataflow pipeline templates (for batch) | `dataflow/templates/` | Medium |
 | CI/CD pipeline (GitHub Actions) | `.github/workflows/` | Low |
-| Prometheus metrics + Grafana dashboards | Monitoring stack | Medium |
+| Cloud Monitoring metrics + Grafana dashboards | Monitoring stack | Medium |
 | Alerting rules | PagerDuty / Slack integration | Low |
 | Security hardening (TLS, RBAC, PII redaction audit) | Security review pass | Medium |
 | Load testing (5M rows) | Performance report | High |
@@ -1232,19 +1268,18 @@ Code Push → GitHub Actions
 
 ## 18. Cost Estimation
 
-### 18.1 Infrastructure (Monthly, AWS)
+### 18.1 Infrastructure (Monthly, GCP)
 
 | Component | Spec | Monthly Cost |
 |-----------|------|-------------|
-| **EKS Cluster** | Control plane | ~$75 |
-| **Worker Pods** (avg 5 × m5.large) | 2 vCPU, 8GB each | ~$350 |
-| **API Pods** (2 × t3.medium) | 2 vCPU, 4GB each | ~$60 |
-| **PostgreSQL** (RDS, db.r6g.large, Multi-AZ) | 2 vCPU, 16GB, 500GB SSD | ~$400 |
-| **Redis** (ElastiCache, cache.m6g.large) | 2 vCPU, 6.4GB | ~$150 |
-| **Kafka** (MSK, 3 brokers, kafka.m5.large) | — | ~$450 |
-| **S3** (audit storage, ~500GB/year) | — | ~$12 |
-| **NAT Gateway + Load Balancer** | — | ~$100 |
-| **Total Infrastructure** | — | **~$1,600/month** |
+| **GKE Cluster** | Autopilot (API + workers) | ~$75 |
+| **Cloud Run** (API, avg 2 instances) | 2 vCPU, 1GB each | ~$60 |
+| **GCP Dataflow** (avg 5 workers, n1-standard-2) | Batch jobs ~8hrs/day | ~$300 |
+| **Cloud SQL** (PostgreSQL, db-n1-standard-2, HA) | 2 vCPU, 7.5GB, 500GB SSD | ~$350 |
+| **Memorystore Redis** (M1, 5GB) | Standard tier, HA | ~$150 |
+| **GCS** (audit + input/output, ~500GB/year) | Standard storage | ~$12 |
+| **Cloud NAT + Load Balancer** | — | ~$80 |
+| **Total Infrastructure** | — | **~$1,027/month** |
 
 ### 18.2 LLM Costs (Monthly)
 
@@ -1260,19 +1295,19 @@ Assumes 5M rows/day, ~15% reach LLM fallback (after disambiguation improvements)
 
 | Provider | Input Cost | Output Cost | Daily | Monthly |
 |----------|-----------|-------------|-------|---------|
-| **GPT-4o-mini** | $0.15/1M | $0.60/1M | ~$45 | **~$1,350** |
-| **Claude Haiku** | $0.25/1M | $1.25/1M | ~$84 | **~$2,520** |
+| **Gemini 1.5 Flash** (Vertex AI) | $0.075/1M | $0.30/1M | ~$19 | **~$560** |
+| **GPT-4o-mini** (fallback) | $0.15/1M | $0.60/1M | ~$45 | **~$1,350** |
 | **Local Ollama** (GPU server) | — | — | ~$30 amortized | **~$900** |
 
-With **response caching** (Redis, 30-day TTL), expect ~40% cache hit rate on recurring addresses, reducing LLM costs by ~40%.
+With **response caching** (Memorystore Redis, 30-day TTL), expect ~40% cache hit rate on recurring addresses, reducing LLM costs by ~40%.
 
 ### 18.3 Total Monthly Cost Estimate
 
 | Component | Cost |
 |-----------|------|
-| Infrastructure | ~$1,600 |
-| LLM (GPT-4o-mini, with caching) | ~$800 |
-| **Total** | **~$2,400/month** |
+| Infrastructure | ~$1,027 |
+| LLM (Gemini Flash, with caching) | ~$336 |
+| **Total** | **~$1,363/month** |
 
 ---
 
@@ -1280,14 +1315,14 @@ With **response caching** (Redis, 30-day TTL), expect ~40% cache hit rate on rec
 
 | # | Risk | Probability | Impact | Mitigation |
 |---|------|-------------|--------|------------|
-| 1 | **LLM provider outage** | Medium | High — 15% of rows affected | Circuit breaker + dead-letter queue + fallback provider |
+| 1 | **LLM provider outage** | Medium | High — 15% of rows affected | Circuit breaker + retry CSV + fallback provider |
 | 2 | **GeoNames data corruption** | Low | Critical — all lookups affected | Staging table + health check benchmark before swap |
 | 3 | **Postal code data gaps** | Medium | Medium — disambiguation degrades | Graceful fallback to population tiebreak |
 | 4 | **libpostal misparsing at scale** | Medium | Medium — more rows reach LLM | Monitor LLM fallback rate; retrain libpostal if available |
 | 5 | **Input data quality worse than expected** | High | High — high needs_review rate | Mismatch detection + upstream data quality feedback loop |
 | 6 | **Database performance under load** | Medium | High — latency spike | Connection pooling, read replicas, query optimization |
 | 7 | **Redis eviction under memory pressure** | Low | Medium — cache miss spike → DB load | Monitor memory; size Redis appropriately |
-| 8 | **Kafka consumer lag during peak** | Medium | Medium — processing delay | HPA auto-scaling; alert at 10k lag |
+| 8 | **Dataflow worker starvation during peak** | Medium | Medium — processing delay | Dataflow autoscaling (max 20 workers); Cloud Monitoring alerts on backlog |
 | 9 | **Cost overrun on LLM** | Medium | Medium — budget exceeded | Token budgets, response caching, Batch API for non-RT |
 | 10 | **GDPR data deletion request** | Low | Medium — operational burden | Automated purge job, soft-delete architecture |
 

@@ -51,7 +51,7 @@ Build a **deterministic-first pipeline** to convert unstructured, multilingual a
 ### Design Principles
 
 1. **`libpostal`** for initial parsing — a rule/model-based multilingual parser, no custom training required.
-2. **`cities5000.txt`** (GeoNames gazetteer) for strict geographic grounding — the system never trusts a town name without external validation.
+2. **`cities1000.txt`** (GeoNames gazetteer) for strict geographic grounding — the system never trusts a town name without external validation.
 3. **LLM fallback only** for rows that deterministic logic cannot resolve — minimizing cost, latency, and hallucination risk.
 
 ---
@@ -101,17 +101,16 @@ Excel Input
 
 ### GeoNames Coverage Choice
 
-We use **`cities5000.txt`** (cities with population ≥ 5,000, ~50k entries) as the baseline dataset. This provides significantly broader coverage than `cities15000.txt` (~25k entries) while keeping memory and ambiguity manageable.
+We use **`cities1000.txt`** (cities with population ≥ 1,000, ~166k entries) as the reference dataset. This provides near-complete town coverage for real-world postal addresses while keeping memory and ambiguity manageable. It was upgraded from `cities5000.txt` (~68k entries) to improve recall for smaller towns and municipalities.
 
 **Remaining coverage gaps:**
-- Villages and rural localities with population < 5,000 will not match.
+- Very small villages and hamlets with population < 1,000 will not match.
 - Suburban neighborhoods and informal district names may not be present.
 
 These gaps are acceptable: unmatched rows will route to LLM fallback and ultimately to `needs_review`, which is the safe default.
 
-**Future upgrade path (if recall is too low):**
-- `cities1000.txt` (~140k entries) for near-complete town coverage.
-- `allCountries.txt` for maximum coverage at the cost of increased memory and higher ambiguity risk.
+**Further upgrade path (if recall is still too low):**
+- `allCountries.txt` (~12M entries) — **not recommended** without filtering, as it includes non-city features (mountains, rivers, parks, etc.) that would cause massive false positives and consume 5–10 GB of RAM. If needed, a filtered subset (feature_class=P only) could be extracted.
 
 ---
 
@@ -143,12 +142,12 @@ These gaps are acceptable: unmatched rows will route to LLM fallback and ultimat
 
 ## 5. Data Sources & Coverage
 
-### Primary: GeoNames `cities5000.txt`
+### Primary: GeoNames `cities1000.txt`
 
-- **Path:** `data/reference/cities5000.txt`
+- **Path:** `data/reference/cities1000.txt`
 - **Format:** TSV with columns: `geonameid`, `name`, `asciiname`, `alternatenames`, `latitude`, `longitude`, `feature_class`, `feature_code`, `country_code`, `admin1`, `population`, `elevation`, `timezone`, `modification_date`, etc.
-- **Record count:** ~50,000+ cities worldwide
-- **Coverage floor:** Population ≥ 5,000
+- **Record count:** ~166,000 cities worldwide
+- **Coverage floor:** Population ≥ 1,000
 
 **How it is used:**
 
@@ -417,11 +416,11 @@ Warnings are structured as a list of strings. Common warning values:
 
 ### GeoNames Loading Strategy
 
-- **On startup:** Load `cities5000.txt` once into an **in-memory, country-indexed dictionary**.
+- **On startup:** Load `cities1000.txt` once into an **in-memory, country-indexed dictionary**.
   - Key: `country_code` → Value: set of normalized names (primary + ASCII + alternates).
-  - Estimated memory footprint: ~100–200 MB depending on alternate name expansion.
+  - Estimated memory footprint: ~200–400 MB depending on alternate name expansion.
 - **Lookup complexity:** O(1) per country filter, O(1) per exact match (set lookup), O(n) per fuzzy scan (within country scope).
-- **Alternate approach (future):** If memory becomes a concern with larger GeoNames datasets, consider SQLite or a trie-based index.
+- **Alternate approach (future):** If memory becomes a concern, consider SQLite or a trie-based index.
 
 ### Batch Processing & LLM Concurrency
 
@@ -475,7 +474,7 @@ The pipeline is designed so that the vast majority of rows resolve in the fast d
 
 | Task | Deliverable |
 |------|-------------|
-| Load and parse `cities5000.txt` | `geonames_loader.py` |
+| Load and parse `cities1000.txt` | `geonames_loader.py` |
 | Build country-indexed lookup maps (`name`, `asciiname`, alternates) | `geonames_matcher.py` |
 | Implement strict exact match | Validation function |
 | Implement deterministic raw-address scan with fuzzy matching | `geonames_scan.py` |
@@ -526,7 +525,7 @@ structured_address_ai_poc/
 │   └── DESIGN.md
 ├── data/
 │   ├── reference/
-│   │   └── cities5000.txt
+│   │   └── cities1000.txt
 │   ├── samples/                    # Test input files
 │   │   └── test_addresses.xlsx
 │   └── output/                     # Pipeline output files
@@ -564,7 +563,7 @@ These must be resolved before implementation begins.
 |---|----------|--------------------------|--------|
 | 1 | **Fuzzy match threshold** | Start at 92/100; tune empirically on test set. 96 may be too strict for transliterated names. | Directly affects recall vs. precision of scan step. |
 | 2 | **Admin hierarchy disambiguation** | Deferred to v2. v1 uses flat city-name matching only. | Affects accuracy for cities with identical names in different provinces. |
-| 3 | **GeoNames dataset tier** | `cities5000.txt` as baseline. Evaluate `cities1000.txt` if recall is too low. | Memory, ambiguity, and coverage trade-off. |
+| 3 | **GeoNames dataset tier** | ✅ **Resolved:** `cities1000.txt` (~166k entries, pop ≥ 1,000). Upgraded from `cities5000.txt` for better recall. `allCountries.txt` rejected due to non-city features and memory cost. | Memory, ambiguity, and coverage trade-off. |
 | 4 | **LLM batch size, concurrency, and timeout** | Batch=10, concurrency=4 threads, timeout=30s per row. | Throughput vs. reliability vs. Ollama server capacity. |
 | 5 | **Warnings format** | `list[string]` with predefined taxonomy (§10). | Downstream consumer compatibility. |
 | 6 | **libpostal installation method** | System-level build vs. Docker container. Docker preferred for reproducibility. | Developer setup complexity. |

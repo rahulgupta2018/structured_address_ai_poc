@@ -17,7 +17,7 @@ REFERENCE_DIR = DATA_DIR / "reference"
 SAMPLES_DIR = DATA_DIR / "samples"
 OUTPUT_DIR = DATA_DIR / "output"
 
-GEONAMES_FILE = REFERENCE_DIR / "cities5000.txt"
+GEONAMES_FILE = REFERENCE_DIR / "cities1000.txt"
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────

@@ -31,6 +31,10 @@ Thumbs.db
 data/output/*.xlsx
 data/output/*.csv
 
+# Large GeoNames reference files (downloaded, not committed)
+data/reference/cities5000.txt
+data/reference/allCountries.txt
+
 # Keep the output directory
 !data/output/.gitkeep
 

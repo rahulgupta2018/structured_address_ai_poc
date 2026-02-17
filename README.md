@@ -63,7 +63,7 @@ CFLAGS="-I/opt/homebrew/include" LDFLAGS="-L/opt/homebrew/lib" pip install posta
 
 ```bash
 # Full pipeline (with LLM fallback)
-python -m src.main --input data/samples/test_addresses.xlsx
+python3 -m src.main --input data/samples/test_addresses.xlsx
 
 # Deterministic-only mode (no LLM)
 python -m src.main --input data/samples/test_addresses.xlsx --skip-llm

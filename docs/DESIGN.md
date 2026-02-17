@@ -288,6 +288,7 @@ These fields are populated on a **best-effort basis** from libpostal's output. T
 | Few-shot examples | Included in prompt |
 | Max tokens | Bounded to prevent runaway responses |
 | Decoding | Deterministic (greedy) |
+| Concurrency | Up to `LLM_CONCURRENCY` (default 4) parallel requests per batch via `ThreadPoolExecutor` |
 
 **Expected response schema:**
 
@@ -303,11 +304,30 @@ These fields are populated on a **best-effort basis** from libpostal's output. T
 
 **Goal:** Ensure the LLM's output is grounded in reality before accepting it.
 
-| Outcome | Condition | Status | Source |
-|---------|-----------|--------|--------|
-| ✅ Match found | LLM candidate matches GeoNames (country-scoped) | `validated` | `llm` |
-| ⚠️ Unverifiable | LLM proposed a town but no GeoNames match | `needs_review` | `llm` |
-| ❌ No candidate | LLM returned `null` or flagged for manual review | `rejected` | — |
+Re-validation uses a **two-tier matching strategy:**
+
+1. **Exact match first** — the LLM-proposed town candidate is checked against the GeoNames index (`name`, `asciiname`, `alternatenames`) using the same normalized exact-match logic as Step 2.
+2. **Fuzzy match fallback** — if the exact match fails, a fuzzy match (`rapidfuzz.fuzz.partial_ratio`) is attempted. This catches cases where the LLM returns an abbreviated or partial name (e.g., `"St-Etienne"` vs. the official GeoNames name `"Court-Saint-Étienne"`).
+
+#### Fuzzy Re-Validation Rules
+
+| Rule | Detail |
+|------|--------|
+| Scorer | `partial_ratio` — finds the best substring alignment between candidate and GeoNames names |
+| Threshold | Same as scan step: `FUZZY_MATCH_THRESHOLD` (default 92) |
+| Ambiguity guard | Top candidates within `FUZZY_AMBIGUITY_MARGIN` (default 5 points) are considered tied |
+| Disambiguation | When tied, the candidate whose GeoNames name has the most token overlap with the full `raw_address` wins |
+| Short-name filter | GeoNames names ≤ 2 characters are excluded to prevent false positives |
+| Confidence | Fuzzy-confirmed matches receive `CONFIDENCE_LLM_FUZZY_CONFIRMED` (0.70), lower than exact LLM matches (0.75) |
+
+#### Outcome Matrix
+
+| Outcome | Condition | Status | Source | Confidence |
+|---------|-----------|--------|--------|------------|
+| ✅ Exact match | LLM candidate matches GeoNames exactly | `validated` | `llm` | 0.75 |
+| ✅ Fuzzy match | LLM candidate fuzzy-matches GeoNames unambiguously | `validated` | `llm` | 0.70 |
+| ⚠️ Unverifiable | LLM proposed a town but no GeoNames match (exact or fuzzy) | `needs_review` | `llm` | 0.40 |
+| ❌ No candidate | LLM returned `null` or flagged for manual review | `rejected` | — | 0.00 |
 
 **Invariant:** No row is auto-validated without a GeoNames match, regardless of source.
 
@@ -353,8 +373,9 @@ The confidence score is a **composite** reflecting how the town was resolved and
 | libpostal → exact GeoNames primary name match | 1.00 | `validated` |
 | libpostal → exact alternate name match | 0.95 | `validated` |
 | GeoNames scan → fuzzy match above threshold | 0.80 | `validated` |
-| LLM → GeoNames confirmed | 0.70–0.85 | `validated` |
-| LLM → no GeoNames match | 0.30–0.50 | `needs_review` |
+| LLM → exact GeoNames match | 0.75 | `validated` |
+| LLM → fuzzy GeoNames match (unambiguous) | 0.70 | `validated` |
+| LLM → no GeoNames match (exact or fuzzy) | 0.40 | `needs_review` |
 | No town candidate from any source | 0.00 | `rejected` |
 
 ---
@@ -402,14 +423,26 @@ Warnings are structured as a list of strings. Common warning values:
 - **Lookup complexity:** O(1) per country filter, O(1) per exact match (set lookup), O(n) per fuzzy scan (within country scope).
 - **Alternate approach (future):** If memory becomes a concern with larger GeoNames datasets, consider SQLite or a trie-based index.
 
-### Batch Processing
+### Batch Processing & LLM Concurrency
 
-| Parameter | Default | Notes |
-|-----------|---------|-------|
-| Input batch size | Entire file | For v1, process full Excel file in one pass |
-| LLM batch size | 10 rows | Send unresolved rows to Ollama in batches |
-| LLM timeout per row | 30 seconds | Configurable via environment variable |
-| LLM max retries | 3 | Exponential backoff: 1s, 2s, 4s |
+| Parameter | Default | Env Var | Notes |
+|-----------|---------|---------|-------|
+| Input batch size | Entire file | — | For v1, process full Excel file in one pass |
+| LLM batch size | 10 rows | `LLM_BATCH_SIZE` | Unresolved rows are grouped into batches |
+| LLM concurrency | 4 threads | `LLM_CONCURRENCY` | Within each batch, requests are sent in parallel via `ThreadPoolExecutor` (range: 1–16) |
+| LLM timeout per row | 30 seconds | `LLM_TIMEOUT_SECONDS` | Configurable via environment variable |
+| LLM max retries | 3 | — | Exponential backoff: 1s, 2s, 4s |
+
+#### How LLM Batching Works
+
+Unresolved rows are divided into batches of `LLM_BATCH_SIZE` (default 10). Within each batch, up to `LLM_CONCURRENCY` (default 4) HTTP requests are sent to Ollama **concurrently** using a `ThreadPoolExecutor`. This parallelism significantly reduces wall-clock time for LLM-heavy workloads:
+
+- **Sequential** (old): 10 rows × 3–4s each ≈ 30–40s per batch
+- **Concurrent** (4 threads): 10 rows ÷ 4 threads × 3–4s ≈ 8–10s per batch
+
+Each thread makes its own `requests.post()` call with independent retry logic. Ollama handles concurrent requests via its built-in request queue. If any individual LLM call raises an unexpected exception, it is caught and the row is marked `needs_review` with an `llm_unavailable` warning — it does not affect other rows in the batch.
+
+> **Tuning note:** Set `LLM_CONCURRENCY=1` to restore sequential behaviour. Increase towards 8–16 if running against a GPU-backed Ollama instance that can serve multiple requests efficiently.
 
 ### Expected Throughput (Estimates)
 
@@ -418,7 +451,8 @@ Warnings are structured as a list of strings. Common warning values:
 | Preprocessing + libpostal | ~1,000 rows/sec |
 | GeoNames exact match | ~10,000 rows/sec (in-memory lookup) |
 | GeoNames fuzzy scan | ~100–500 rows/sec (depends on lexicon size per country) |
-| LLM fallback | ~1–5 rows/sec (local inference, model-dependent) |
+| LLM fallback (sequential) | ~1–5 rows/sec (local inference, model-dependent) |
+| LLM fallback (4 threads) | ~4–15 rows/sec (limited by model throughput) |
 
 The pipeline is designed so that the vast majority of rows resolve in the fast deterministic stages, with only a small fraction reaching the LLM.
 
@@ -531,7 +565,7 @@ These must be resolved before implementation begins.
 | 1 | **Fuzzy match threshold** | Start at 92/100; tune empirically on test set. 96 may be too strict for transliterated names. | Directly affects recall vs. precision of scan step. |
 | 2 | **Admin hierarchy disambiguation** | Deferred to v2. v1 uses flat city-name matching only. | Affects accuracy for cities with identical names in different provinces. |
 | 3 | **GeoNames dataset tier** | `cities5000.txt` as baseline. Evaluate `cities1000.txt` if recall is too low. | Memory, ambiguity, and coverage trade-off. |
-| 4 | **LLM batch size and timeout** | Batch=10, timeout=30s per row. | Throughput vs. reliability. |
+| 4 | **LLM batch size, concurrency, and timeout** | Batch=10, concurrency=4 threads, timeout=30s per row. | Throughput vs. reliability vs. Ollama server capacity. |
 | 5 | **Warnings format** | `list[string]` with predefined taxonomy (§10). | Downstream consumer compatibility. |
 | 6 | **libpostal installation method** | System-level build vs. Docker container. Docker preferred for reproducibility. | Developer setup complexity. |
 

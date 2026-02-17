@@ -6,14 +6,15 @@ Wires all stages together:
   Step 1  → libpostal parse
   Step 2  → GeoNames strict validation
   Step 3  → GeoNames raw-address scan
-  Step 4  → LLM fallback (batched)
-  Step 5  → Final GeoNames re-validation + decision engine
+  Step 4  → LLM fallback (concurrent, batched)
+  Step 5  → Final GeoNames re-validation (exact + fuzzy) + decision engine
 """
 
 from __future__ import annotations
 
 import logging
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -132,49 +133,75 @@ def run(
         llm_queue.append((len(results), inp, output, libpostal_result, raw_address))
         results.append(output)  # placeholder — will be updated in-place
 
-    # ── Step 4 & 5: LLM fallback (batched) ───────────────────────────────
+    # ── Step 4 & 5: LLM fallback (concurrent, batched) ────────────────────
     if llm_queue and not skip_llm:
         logger.info(
-            "Sending %d unresolved rows to LLM fallback …", len(llm_queue)
+            "Sending %d unresolved rows to LLM fallback "
+            "(concurrency=%d, batch_size=%d) …",
+            len(llm_queue),
+            config.LLM_CONCURRENCY,
+            config.LLM_BATCH_SIZE,
         )
         for batch_start in range(0, len(llm_queue), config.LLM_BATCH_SIZE):
             batch = llm_queue[batch_start : batch_start + config.LLM_BATCH_SIZE]
 
-            for result_idx, inp, output, libpostal_result, raw_address in batch:
-                llm_response, llm_warnings = call_llm(
-                    inp.address_1,
-                    inp.address_2,
-                    inp.address_3,
-                    inp.country_code,
-                    output.warnings.copy(),
-                )
-                output.warnings.extend(llm_warnings)
-
-                # Step 5: Final GeoNames re-validation
-                # Try exact first, then fuzzy if the LLM candidate
-                # is a partial/abbreviated form of the official name.
-                llm_match: Optional[GeoNamesMatch] = None
-                if llm_response and llm_response.town_candidate:
-                    llm_match = match_exact(
-                        geonames_index,
-                        llm_response.town_candidate,
+            # Submit all rows in this batch concurrently
+            with ThreadPoolExecutor(
+                max_workers=config.LLM_CONCURRENCY
+            ) as executor:
+                future_to_item = {
+                    executor.submit(
+                        call_llm,
+                        inp.address_1,
+                        inp.address_2,
+                        inp.address_3,
                         inp.country_code,
+                        output.warnings.copy(),
+                    ): (result_idx, inp, output, libpostal_result, raw_address)
+                    for result_idx, inp, output, libpostal_result, raw_address in batch
+                }
+
+                for future in as_completed(future_to_item):
+                    result_idx, inp, output, libpostal_result, raw_address = (
+                        future_to_item[future]
                     )
-                    if not llm_match.matched:
-                        llm_match = match_fuzzy(
+                    try:
+                        llm_response, llm_warnings = future.result()
+                    except Exception:
+                        logger.exception(
+                            "Unexpected error in LLM call for row %d",
+                            result_idx,
+                        )
+                        llm_response = None
+                        llm_warnings = ["llm_unavailable"]
+
+                    output.warnings.extend(llm_warnings)
+
+                    # Step 5: Final GeoNames re-validation
+                    # Try exact first, then fuzzy if the LLM candidate
+                    # is a partial/abbreviated form of the official name.
+                    llm_match: Optional[GeoNamesMatch] = None
+                    if llm_response and llm_response.town_candidate:
+                        llm_match = match_exact(
                             geonames_index,
                             llm_response.town_candidate,
                             inp.country_code,
-                            raw_address=raw_address,
                         )
+                        if not llm_match.matched:
+                            llm_match = match_fuzzy(
+                                geonames_index,
+                                llm_response.town_candidate,
+                                inp.country_code,
+                                raw_address=raw_address,
+                            )
 
-                output = decide(
-                    inp, output,
-                    libpostal_result, None,  # libpostal match already failed
-                    None,  # scan already failed
-                    llm_response, llm_match,
-                )
-                results[result_idx] = output
+                    output = decide(
+                        inp, output,
+                        libpostal_result, None,  # libpostal match already failed
+                        None,  # scan already failed
+                        llm_response, llm_match,
+                    )
+                    results[result_idx] = output
     elif llm_queue and skip_llm:
         logger.info(
             "Skipping LLM fallback for %d unresolved rows (skip_llm=True)",

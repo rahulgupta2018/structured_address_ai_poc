@@ -85,6 +85,7 @@ LLM_MAX_TOKENS: int = 256
 LLM_TIMEOUT_SECONDS: int = int(os.getenv("LLM_TIMEOUT_SECONDS", "30"))
 LLM_MAX_RETRIES: int = 3
 LLM_BATCH_SIZE: int = int(os.getenv("LLM_BATCH_SIZE", "10"))
+LLM_CONCURRENCY: int = _validated_int_env("LLM_CONCURRENCY", default=4, min_val=1, max_val=16)
 
 # ── Confidence score weights ────────────────────────────────────────────────
 CONFIDENCE_EXACT_PRIMARY: float = 1.00

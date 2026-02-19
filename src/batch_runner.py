@@ -21,16 +21,26 @@ Ollama server to allow multiple concurrent inferences:
 For 32k-row production batches the recommended settings are:
     --concurrency 8 --batch-size 500
 
+Checkpointing & crash recovery
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+A rolling checkpoint file (``<output>.ckpt.csv``) is written after
+each batch completes. If the process crashes, re-run with ``--resume``
+to skip already-completed rows and continue from where it left off.
+
 Usage:
-    python batch_runner.py data/input/test_addresses.xlsx
-    python batch_runner.py data/input/test_addresses.xlsx --concurrency 8
-    python batch_runner.py data/input/big.csv --concurrency 16 --batch-size 500
+    python -m src.batch_runner data/input/test_addresses.xlsx
+    python -m src.batch_runner data/input/test_addresses.xlsx --concurrency 8
+    python -m src.batch_runner data/input/big.csv --concurrency 16 --batch-size 500
+
+    # Resume after a crash — picks up from last checkpoint:
+    python -m src.batch_runner data/input/big.csv --resume
 """
 
 from __future__ import annotations
 
 import argparse
 import asyncio
+import csv
 import logging
 import os
 import sys
@@ -39,6 +49,7 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 
+import pandas as pd
 from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
 from google.genai import types
@@ -56,6 +67,80 @@ USER_ID = "batch_user"
 # Default concurrency — can be overridden via CLI or env
 DEFAULT_CONCURRENCY = int(os.getenv("BATCH_CONCURRENCY", "4"))
 DEFAULT_BATCH_SIZE = int(os.getenv("BATCH_SIZE", "200"))
+
+
+# ── Checkpoint helpers ───────────────────────────────────────────────────────
+
+
+def _checkpoint_path(output_file: Path) -> Path:
+    """Return the rolling checkpoint path for a given output file."""
+    return output_file.with_suffix(".ckpt.csv")
+
+
+def _write_checkpoint(results: list[dict | None], ckpt_file: Path) -> int:
+    """Write all non-None results to the checkpoint CSV.
+
+    Each result dict is augmented with ``__row_index__`` (1-based) so
+    the resume logic knows which rows are done. Returns the count of
+    rows written.
+    """
+    valid = [(i, r) for i, r in enumerate(results) if r is not None]
+    if not valid:
+        return 0
+
+    rows_to_write: list[dict] = []
+    for idx, result in valid:
+        row = dict(result)
+        row["__row_index__"] = idx + 1  # 1-based, matches _process_row
+        rows_to_write.append(row)
+
+    df = pd.DataFrame(rows_to_write)
+    df.to_csv(ckpt_file, index=False)
+    return len(rows_to_write)
+
+
+def _load_checkpoint(ckpt_file: Path) -> dict[int, dict]:
+    """Load a checkpoint CSV and return {row_index: result_dict}.
+
+    Returns an empty dict if the file doesn't exist or can't be read.
+    """
+    if not ckpt_file.exists():
+        return {}
+
+    try:
+        df = pd.read_csv(ckpt_file, dtype=str, keep_default_na=False)
+    except Exception as exc:
+        logger.warning("Could not read checkpoint %s: %s", ckpt_file, exc)
+        return {}
+
+    if "__row_index__" not in df.columns:
+        logger.warning("Checkpoint %s missing __row_index__ column — ignoring", ckpt_file)
+        return {}
+
+    loaded: dict[int, dict] = {}
+    for _, row_data in df.iterrows():
+        try:
+            idx = int(row_data["__row_index__"])
+        except (ValueError, TypeError):
+            continue
+        result = row_data.to_dict()
+        del result["__row_index__"]
+        # Restore numeric types for key fields
+        for key in ("confidence_score", "geonames_id"):
+            val = result.get(key)
+            if val is not None and val != "":
+                try:
+                    result[key] = float(val) if key == "confidence_score" else int(float(val))
+                except (ValueError, TypeError):
+                    pass
+        # Restore boolean fields
+        for key in ("geonames_match", "mismatch_detected"):
+            val = result.get(key)
+            if isinstance(val, str):
+                result[key] = val.lower() in ("true", "1", "yes")
+        loaded[idx] = result
+
+    return loaded
 
 
 # ── Per-row processing ───────────────────────────────────────────────────────
@@ -154,6 +239,7 @@ async def run_batch(
     output_path: str | None = None,
     concurrency: int = DEFAULT_CONCURRENCY,
     batch_size: int = DEFAULT_BATCH_SIZE,
+    resume: bool = False,
 ) -> Path:
     """Run the full batch pipeline with async concurrency.
 
@@ -162,6 +248,8 @@ async def run_batch(
         output_path:  Path to the output file.
         concurrency:  Max rows processed simultaneously.
         batch_size:   Rows per batch (checkpoint written between batches).
+        resume:       If True, load the checkpoint file and skip rows
+                      that were already processed.
 
     Returns:
         Path to the written output file.
@@ -183,6 +271,8 @@ async def run_batch(
         output_file = Path(output_path)
         output_file.parent.mkdir(parents=True, exist_ok=True)
 
+    ckpt_file = _checkpoint_path(output_file)
+
     # Read input
     logger.info("Reading input: %s", input_file)
     logger.info("Job ID: %s", job_id)
@@ -191,7 +281,25 @@ async def run_batch(
     logger.info("Total rows: %d | concurrency: %d | batch_size: %d",
                 total, concurrency, batch_size)
 
-    # Set up ADK runner
+    # ── Resume from checkpoint ───────────────────────────────────
+    results: list[dict | None] = [None] * total  # pre-allocate for ordered placement
+    skipped = 0
+
+    if resume:
+        prior = _load_checkpoint(ckpt_file)
+        if prior:
+            for idx, result in prior.items():
+                if 1 <= idx <= total:
+                    results[idx - 1] = result
+                    skipped += 1
+            logger.info(
+                "Resumed from checkpoint: %d/%d rows already done — %d remaining",
+                skipped, total, total - skipped,
+            )
+        else:
+            logger.info("No usable checkpoint found — starting from scratch")
+
+    # ── Set up ADK runner ────────────────────────────────────────
     session_service = InMemorySessionService()
     runner = Runner(
         app_name=APP_NAME,
@@ -200,71 +308,99 @@ async def run_batch(
     )
 
     semaphore = asyncio.Semaphore(concurrency)
-    results: list[dict] = [None] * total  # pre-allocate for ordered placement
-    completed = 0
+    completed = skipped
     t0 = time.perf_counter()
 
     # Process in batches so we can checkpoint between them
     for batch_start in range(0, total, batch_size):
         batch_end = min(batch_start + batch_size, total)
-        batch_rows = rows[batch_start:batch_end]
+
+        # Collect rows that still need processing in this batch
+        pending: list[tuple[int, dict]] = []
+        for i in range(batch_start, batch_end):
+            if results[i] is None:
+                pending.append((i + 1, rows[i]))  # (1-based row_index, row)
+
+        if not pending:
+            logger.info(
+                "Batch %d–%d of %d — all rows already done (checkpoint), skipping",
+                batch_start + 1, batch_end, total,
+            )
+            continue
 
         logger.info(
-            "Batch %d–%d of %d (size %d)",
-            batch_start + 1, batch_end, total, len(batch_rows),
+            "Batch %d–%d of %d (%d pending, %d already done)",
+            batch_start + 1, batch_end, total,
+            len(pending), (batch_end - batch_start) - len(pending),
         )
 
-        # Launch all rows in this batch concurrently
+        # Launch pending rows concurrently
         tasks = []
-        for i, row in enumerate(batch_rows):
-            idx = batch_start + i  # 0-based global index
+        for row_index, row in pending:
             tasks.append(
                 asyncio.create_task(
-                    _process_row(runner, session_service, idx + 1, row, semaphore, job_id),
-                    name=f"row-{idx + 1}",
+                    _process_row(runner, session_service, row_index, row, semaphore, job_id),
+                    name=f"row-{row_index}",
                 )
             )
 
         # Gather results — exceptions are returned, not raised
         task_results = await asyncio.gather(*tasks, return_exceptions=True)
 
-        for i, task_result in enumerate(task_results):
-            global_idx = batch_start + i
-            row = rows[global_idx]
+        for j, task_result in enumerate(task_results):
+            row_index, row = pending[j]
+            global_idx = row_index - 1  # back to 0-based
 
             if isinstance(task_result, Exception):
                 logger.exception(
-                    "Row %d failed: %s", global_idx + 1, task_result,
+                    "Row %d failed: %s", row_index, task_result,
                 )
                 results[global_idx] = _make_error_result(row)
             else:
-                row_index, result_dict = task_result
+                _, result_dict = task_result
                 results[global_idx] = result_dict
 
             completed += 1
 
         # Progress
         elapsed = time.perf_counter() - t0
-        rate = completed / elapsed if elapsed > 0 else 0
+        rate = (completed - skipped) / elapsed if elapsed > 0 else 0
         logger.info(
-            "Progress: %d/%d completed (%.1f rows/sec, elapsed %.1fs)",
+            "Progress: %d/%d completed (%.1f new rows/sec, elapsed %.1fs)",
             completed, total, rate, elapsed,
         )
 
-        # Checkpoint between batches (not after the last one)
-        if batch_end < total and completed >= CHECKPOINT_INTERVAL_ROWS:
-            ckpt_path = output_file.with_suffix(f".ckpt_{completed}.csv")
-            valid_results = [r for r in results if r is not None]
-            write_output(valid_results, str(ckpt_path))
-            logger.info("Checkpoint: %s (%d rows)", ckpt_path, len(valid_results))
+        # Write rolling checkpoint after every batch
+        if batch_end < total:
+            n_saved = _write_checkpoint(results, ckpt_file)
+            logger.info(
+                "Checkpoint saved: %s (%d rows). "
+                "To resume after a crash: --resume -o %s",
+                ckpt_file, n_saved, output_file,
+            )
 
-    # Write final output
+    # ── Write final output ───────────────────────────────────────
+    # Replace any remaining Nones with error results (should not happen)
+    for i in range(total):
+        if results[i] is None:
+            logger.warning("Row %d: no result after all batches — marking rejected", i + 1)
+            results[i] = _make_error_result(rows[i])
+
+    final_results: list[dict] = [r for r in results if r is not None]
+
     elapsed = time.perf_counter() - t0
-    output_written = write_output(results, str(output_file))
+    output_written = write_output(final_results, str(output_file))
     logger.info(
-        "Done: %d rows in %.1fs (%.1f rows/sec). Output: %s",
-        total, elapsed, total / elapsed if elapsed > 0 else 0, output_written,
+        "Done: %d rows (%d new + %d resumed) in %.1fs (%.1f rows/sec). Output: %s",
+        total, total - skipped, skipped,
+        elapsed, (total - skipped) / elapsed if elapsed > 0 else 0,
+        output_written,
     )
+
+    # Clean up checkpoint file after successful completion
+    if ckpt_file.exists():
+        ckpt_file.unlink()
+        logger.info("Checkpoint removed: %s", ckpt_file)
 
     return output_written
 
@@ -303,6 +439,13 @@ def main():
         default="INFO",
         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
         help="Logging level (default: INFO).",
+    )
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        default=False,
+        help="Resume from last checkpoint. Requires -o to match the "
+             "original output path so the checkpoint file can be found.",
     )
 
     args = parser.parse_args()
@@ -351,6 +494,7 @@ def main():
 
     asyncio.run(run_batch(
         args.input_file, args.output, args.concurrency, args.batch_size,
+        resume=args.resume,
     ))
 
 

@@ -3,15 +3,37 @@
 # run_batch.sh — Run the address pipeline batch job
 #
 # Usage:
-#   ./scripts/run_batch.sh 2>&1 | tail -40   # 13-row test file, defaults
-#   ./scripts/run_batch.sh data/input/big.csv       # custom input file
-#   ./scripts/run_batch.sh data/input/big.csv 8     # custom concurrency
+#   # 13-row test file with defaults (concurrency=4, batch_size=200)
+#   ./scripts/run_batch.sh
+#
+#   # 13-row test file with explicit options
+#   ./scripts/run_batch.sh data/input/test_addresses.xlsx -c 4 -b 5 --loglevel INFO
+#
+#   # Custom input file
+#   ./scripts/run_batch.sh data/input/addresses_32k.csv
+#
+#   # Custom input + output + concurrency + batch size
+#   ./scripts/run_batch.sh data/input/addresses_32k.csv \
+#       -o data/output/addresses_32k_output.csv -c 8 -b 500
+#
+#   # Resume after crash (output path must match the original run)
+#   ./scripts/run_batch.sh data/input/addresses_32k.csv \
+#       -o data/output/addresses_32k_output.csv -c 8 -b 500 --resume
+#
+#   # Debug logging
+#   ./scripts/run_batch.sh --loglevel DEBUG
+#
+# Options:
+#   <input_file>              Input file (Excel or CSV). Default: data/input/test_addresses.xlsx
+#   -o, --output <path>       Output CSV path. Default: data/output/<input>_output.csv
+#   -c, --concurrency <n>     Max rows processed concurrently (default: 4)
+#   -b, --batch-size <n>      Rows per batch / checkpoint interval (default: 200)
+#   --loglevel <LEVEL>        DEBUG | INFO | WARNING | ERROR (default: INFO)
+#   --resume                  Resume from last checkpoint (.ckpt.csv next to output)
 #
 # Environment variables (optional):
 #   LLM_CONCURRENCY=4        — parallel LLM calls (match OLLAMA_NUM_PARALLEL)
 #   OLLAMA_BASE_URL=http://localhost:11434
-#   BATCH_CONCURRENCY=4      — default row concurrency
-#   BATCH_SIZE=200            — checkpoint interval (rows per batch)
 # ──────────────────────────────────────────────────────────────
 set -euo pipefail
 
@@ -30,9 +52,53 @@ else
 fi
 
 # ── Parse arguments ───────────────────────────────────────────
-INPUT_FILE="${1:-data/input/test_addresses.xlsx}"
-CONCURRENCY="${2:-4}"
-LOGLEVEL="${3:-INFO}"
+# Detect if --resume is in the args (pass everything through to Python)
+PASSTHROUGH_ARGS=()
+INPUT_FILE=""
+CONCURRENCY=""
+LOGLEVEL="INFO"
+RESUME=false
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --resume)
+            RESUME=true
+            PASSTHROUGH_ARGS+=("--resume")
+            shift
+            ;;
+        -o|--output)
+            PASSTHROUGH_ARGS+=("-o" "$2")
+            shift 2
+            ;;
+        -c|--concurrency)
+            CONCURRENCY="$2"
+            shift 2
+            ;;
+        --loglevel)
+            LOGLEVEL="$2"
+            shift 2
+            ;;
+        -b|--batch-size)
+            PASSTHROUGH_ARGS+=("-b" "$2")
+            shift 2
+            ;;
+        -*)
+            PASSTHROUGH_ARGS+=("$1")
+            shift
+            ;;
+        *)
+            if [[ -z "$INPUT_FILE" ]]; then
+                INPUT_FILE="$1"
+            elif [[ -z "$CONCURRENCY" ]]; then
+                CONCURRENCY="$1"
+            fi
+            shift
+            ;;
+    esac
+done
+
+INPUT_FILE="${INPUT_FILE:-data/input/test_addresses.xlsx}"
+CONCURRENCY="${CONCURRENCY:-4}"
 
 # ── Verify input file exists ─────────────────────────────────
 if [[ ! -f "$INPUT_FILE" ]]; then
@@ -54,8 +120,12 @@ echo "  📂 Input:       $INPUT_FILE"
 echo "  ⚡ Concurrency: $CONCURRENCY"
 echo "  📋 Log level:   $LOGLEVEL"
 echo "  🤖 LLM conc.:  ${LLM_CONCURRENCY:-1}"
+if $RESUME; then
+    echo "  🔄 Resuming from checkpoint"
+fi
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
 python -m src.batch_runner "$INPUT_FILE" \
     --concurrency "$CONCURRENCY" \
-    --loglevel "$LOGLEVEL"
+    --loglevel "$LOGLEVEL" \
+    "${PASSTHROUGH_ARGS[@]+${PASSTHROUGH_ARGS[@]}}"

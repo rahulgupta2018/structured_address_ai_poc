@@ -1238,176 +1238,116 @@ services/io_writer.py  →  write_output()  →  data/output/test_addresses_resu
 
 ## 10. Checkpointing & Crash Recovery
 
-> Carries forward v2 §12.6. A 5M-row batch takes ~1–2 hours. Without checkpointing, a crash at row 4M loses all progress. This section adapts the v2 chunk-based checkpointing strategy to the ADK Runner-in-Dataflow pattern.
+> For a 32K-row batch at ~10s per LLM row, a full run takes ~1 hour. Without checkpointing, a crash at row 25K loses all progress. This section covers both the **implemented local checkpointing** (§10.1) and the **planned production checkpointing** for Dataflow (§10.4+).
 
-### 10.1 Strategy: Chunk-Based Write-Ahead Partial Results
+### 10.1 Local Checkpointing (Implemented)
+
+`src/batch_runner.py` implements **rolling checkpoint + resume** for local batch runs:
 
 ```
-┌────────────────────────────────────────────────────────────────┐
-│  Checkpointing Flow (per Dataflow job)                         │
-│                                                                │
-│  CSV Input (5M rows)                                           │
-│    │                                                           │
-│    ├─ Chunk 1 (rows 1–1,000)                                   │
-│    │    ├─ ProcessAddressFn runs ADK Runner per row             │
-│    │    ├─ Write results to Cloud SQL (batch INSERT)           │
-│    │    ├─ Write partial CSV to GCS:                           │
-│    │    │    gs://output/job_abc/chunk_00001.csv                │
-│    │    ├─ Update job progress: processed_rows = 1,000         │
-│    │    └─ ✅ Checkpoint committed                              │
-│    │                                                           │
-│    ├─ Chunk 2 (rows 1,001–2,000)                               │
-│    │    ├─ ProcessAddressFn → Write → Update progress          │
-│    │    └─ ✅ Checkpoint committed                              │
-│    │                                                           │
-│    ├─ ...                                                      │
-│    │                                                           │
-│    ├─ 💥 CRASH at row 4,000,042                                │
-│    │                                                           │
-│    │  Recovery:                                                │
-│    │    1. Query Cloud SQL: last committed chunk = 4000         │
-│    │    2. Resume from row 4,000,001                            │
-│    │    3. Re-process only remaining chunks via ADK Runner     │
-│    │    4. Merge partial CSVs into final output                 │
-│    │                                                           │
-│    └─ Chunk 5000 (rows 4,999,001–5,000,000)                    │
-│         └─ ✅ Job complete                                      │
-│                                                                │
-│  Final: merge gs://output/job_abc/chunk_*.csv                  │
-│       → gs://output/job_abc/results_final.csv                   │
-└────────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────┐
+│  Local Checkpointing Flow                                           │
+│                                                                     │
+│  Input: 32K rows, batch_size=200, concurrency=8                     │
+│    │                                                                │
+│    ├─ Batch 1 (rows 1–200)                                          │
+│    │    ├─ Process 200 rows via ADK Runner (concurrent)              │
+│    │    ├─ Write rolling checkpoint:                                 │
+│    │    │    <output>.ckpt.csv (200 rows + __row_index__)            │
+│    │    └─ ✅ Batch complete                                         │
+│    │                                                                │
+│    ├─ Batch 2 (rows 201–400)                                        │
+│    │    ├─ Process 200 rows                                          │
+│    │    ├─ Overwrite checkpoint: <output>.ckpt.csv (400 rows)        │
+│    │    └─ ✅ Batch complete                                         │
+│    │                                                                │
+│    ├─ ...                                                           │
+│    │                                                                │
+│    ├─ 💥 CRASH at row 25,042 (during batch 126)                     │
+│    │                                                                │
+│    │  Recovery:                                                     │
+│    │    python -m src.batch_runner input.csv -o output.csv --resume  │
+│    │    1. Load <output>.ckpt.csv → 25,000 rows done                │
+│    │    2. Skip batches 1–125 (all rows present in checkpoint)       │
+│    │    3. Re-process only rows 25,001–32,000                        │
+│    │    4. Write final output, delete checkpoint                     │
+│    │                                                                │
+│    └─ Batch 160 (rows 31,801–32,000)                                │
+│         ├─ Write final output: <output>.csv (32,000 rows)            │
+│         ├─ Delete checkpoint file                                    │
+│         └─ ✅ Job complete                                           │
+└─────────────────────────────────────────────────────────────────────┘
 ```
 
-### 10.2 Checkpoint Granularity
+#### Checkpoint file format
 
-| Parameter | Default | Notes |
-|-----------|---------|-------|
-| `CHECKPOINT_INTERVAL_ROWS` | 1,000 | Rows per checkpoint. At ~2KB/row, each commit is ~2MB — negligible overhead for Cloud SQL batch INSERT. |
-| `CHECKPOINT_INTERVAL_SECONDS` | 60 (1 min) | Time-based fallback if row throughput is slow (e.g., many LLM calls in a chunk). |
-| `CHECKPOINT_TARGET` | `cloud_sql` | Where progress is recorded. Cloud SQL (primary) + GCS (partial CSVs as backup). |
+The checkpoint is a CSV with all the standard output columns **plus** a `__row_index__` column (1-based, matches the row's position in the input file). On resume, each `__row_index__` is matched to the input to determine which rows are already done.
 
-### 10.3 Implementation: ADK Runner with Checkpointed Chunks
+#### Usage
 
-Dataflow's **built-in checkpointing** handles worker-level fault tolerance — if a worker dies, Dataflow reassigns its bundle to another worker. However, this is within a single job run. If the entire job fails (OOM, quota exceeded, network partition), Dataflow does NOT auto-resume.
+```bash
+# Normal run — checkpoints are written automatically between batches
+python -m src.batch_runner data/input/big.csv -o data/output/big_output.csv
 
-**Application-level checkpointing** covers the job-level restart case. We wrap the `ProcessAddressFn` from §9.4 inside a chunk-based checkpoint manager:
+# Resume after crash — skips completed rows
+python -m src.batch_runner data/input/big.csv -o data/output/big_output.csv --resume
 
-```python
-from google.adk.runners import Runner
-from google.adk.sessions import InMemorySessionService
-from google.genai import types
-
-
-class CheckpointedBatchProcessor:
-    """Wraps ADK Runner with chunk-based checkpointing.
-
-    Each chunk of CHECKPOINT_INTERVAL_ROWS is processed through the
-    ADK pipeline, results are committed atomically to Cloud SQL,
-    and a partial CSV is written to GCS as a recovery point.
-    """
-
-    def __init__(self, job_id: str, chunk_size: int = 1_000):
-        self.job_id = job_id
-        self.chunk_size = chunk_size
-        self.pipeline_agent = create_pipeline_agent()
-        self.session_service = InMemorySessionService()
-
-    def get_resume_offset(self) -> int:
-        """Query Cloud SQL for last committed chunk."""
-        row = db.execute(
-            "SELECT processed_rows FROM jobs WHERE job_id = %s",
-            (self.job_id,)
-        ).fetchone()
-        return row["processed_rows"] if row else 0
-
-    async def process_row_via_adk(self, row: dict) -> dict:
-        """Run a single row through the ADK agent pipeline."""
-        session = await self.session_service.create_session(
-            app_name="address_ai",
-            user_id="dataflow",
-            session_id=f"row_{row['row_index']}",
-            state=row,
-        )
-
-        runner = Runner(
-            agent=self.pipeline_agent,
-            app_name="address_ai",
-            session_service=self.session_service,
-        )
-
-        content = types.Content(
-            role="user",
-            parts=[types.Part(text=f"Process row {row['row_index']}")],
-        )
-
-        async for event in runner.run_async(
-            user_id="dataflow",
-            session_id=f"row_{row['row_index']}",
-            new_message=content,
-        ):
-            pass
-
-        final = await self.session_service.get_session(
-            app_name="address_ai",
-            user_id="dataflow",
-            session_id=f"row_{row['row_index']}",
-        )
-        return final.state.get("final_result")
-
-    async def process_chunk(self, chunk: list[dict], chunk_num: int):
-        """Process one chunk through ADK pipeline and commit checkpoint."""
-        results = [await self.process_row_via_adk(row) for row in chunk]
-
-        # Atomic: write results + update progress in one transaction
-        with db.transaction():
-            db.bulk_insert("address_results", results)
-            db.execute(
-                "UPDATE jobs SET processed_rows = %s WHERE job_id = %s",
-                (chunk_num * self.chunk_size, self.job_id)
-            )
-
-        # Write partial CSV to GCS (outside transaction — idempotent)
-        gcs.upload(
-            f"gs://output/{self.job_id}/chunk_{chunk_num:04d}.csv",
-            to_csv(results)
-        )
+# Via shell script
+./scripts/run_batch.sh data/input/big.csv --resume -o data/output/big_output.csv
 ```
 
-### 10.4 Idempotency
+#### Key behaviors
 
-Checkpointing requires idempotent writes — re-processing a chunk must produce the same result:
+| Behavior | Detail |
+|----------|--------|
+| Checkpoint frequency | After every batch (controlled by `--batch-size`, default 200) |
+| Checkpoint file | `<output_path>.ckpt.csv` — single rolling file, overwritten each batch |
+| Resume detection | `--resume` flag loads checkpoint, marks matching `__row_index__` rows as done |
+| Batch skipping | Entire batches are skipped if all their rows are in the checkpoint |
+| Partial batch | If a batch is partially done (crash mid-batch), un-done rows are re-processed |
+| Max data loss | ≤ 1 batch_size of rows (default 200). Worst case: crash right before checkpoint write. |
+| Cleanup | Checkpoint file is deleted after successful final output write |
+| Type restoration | `confidence_score`, `geonames_id`, `geonames_match`, `mismatch_detected` are restored to proper Python types on resume |
 
-| Component | Idempotency Mechanism |
-|-----------|----------------------|
-| Cloud SQL results | `UNIQUE (job_id, row_index)` constraint + `ON CONFLICT DO UPDATE` (upsert) |
-| GCS partial CSVs | Overwrite same chunk filename (GCS write is atomic per object) |
-| Job progress | `UPDATE` is naturally idempotent |
-| LLM calls | Deterministic (temperature=0) + response cache in Redis |
-| ADK session state | `InMemorySessionService` — fresh per row, no stale state |
+### 10.2 Recommended Settings for 32K Rows
 
-### 10.5 Crash Scenarios & Recovery
+```bash
+# 32K rows with Ollama (OLLAMA_NUM_PARALLEL=4):
+python -m src.batch_runner data/input/addresses_32k.csv \
+    -o data/output/addresses_32k_output.csv \
+    --concurrency 8 \
+    --batch-size 500
+
+# If it crashes:
+python -m src.batch_runner data/input/addresses_32k.csv \
+    -o data/output/addresses_32k_output.csv \
+    --concurrency 8 \
+    --batch-size 500 \
+    --resume
+```
+
+| Parameter | Value | Rationale |
+|-----------|-------|-----------|
+| `--concurrency 8` | 8 rows in-flight | Saturates 4 Ollama slots + 4 deterministic rows |
+| `--batch-size 500` | 500 rows per checkpoint | ~10 min between checkpoints at ~1 row/sec. Max loss: 500 rows (~8 min). |
+| `LLM_CONCURRENCY=4` | 4 parallel LLM calls | Match `OLLAMA_NUM_PARALLEL=4` on the server |
+
+Estimated runtime: ~85% deterministic (instant) + ~15% LLM (~10s each) = 32K × 0.15 × 10s / 4 parallel ≈ **2 hours**.
+
+### 10.3 Crash Scenarios & Recovery (Local)
 
 | Scenario | Data Loss | Recovery |
 |----------|-----------|----------|
-| Single Dataflow worker dies | 0 rows | Dataflow auto-retries the failed bundle on another worker |
-| Entire Dataflow job fails | ≤ 1,000 rows (1 chunk) | Restart job with `--resume` flag; skips committed chunks |
-| Cloud SQL connection lost mid-chunk | ≤ 1,000 rows | Transaction rolls back; chunk retried on next attempt |
-| Redis cache lost | 0 rows | Cache miss → DB fallback. LLM responses re-fetched (slower, no data loss) |
-| GCS partial CSV write fails | 0 rows | Results already in Cloud SQL. CSV re-generated from DB at job completion |
-| ADK Runner error (agent exception) | 1 row | Row marked `status=error` in result; chunk continues. Logged for investigation. |
+| Process killed (Ctrl+C, OOM, power loss) | ≤ batch_size rows (default 200) | `--resume` loads last checkpoint, re-processes remaining rows |
+| Ollama crash/timeout | 1 row (marked `rejected`) | Row gets `status=rejected, review_reason=unhandled_exception`. Other rows in batch continue. |
+| Disk full during checkpoint write | ≤ batch_size rows | Previous checkpoint may be corrupt. Delete `.ckpt.csv` and restart without `--resume`. |
+| Input file changed between runs | Undefined | `--resume` matches by `__row_index__` (position). If rows shifted, results will be misaligned. Always use same input file. |
 
-### 10.6 Monitoring Checkpoints
+### 10.4 Production Checkpointing (Dataflow — Future)
 
-| Metric | Purpose |
-|--------|---------|
-| `address_checkpoint_committed_total` | Track checkpointing frequency |
-| `address_checkpoint_duration_seconds` | Detect slow commits (DB bottleneck) |
-| `address_job_resume_total` | How often jobs are resumed (crash frequency indicator) |
-| `address_chunk_reprocess_total` | Rows re-processed after resume (waste indicator) |
+> The following sections describe the **planned production design** for GCP Dataflow. Not yet implemented — target for Phase 9/10.
 
-### 10.7 Relationship to ADK Sessions
-
-The checkpointing layer is **outside ADK** — it wraps the ADK `Runner` invocation. ADK's `InMemorySessionService` is per-row and ephemeral (created, used, discarded). The checkpointing layer tracks progress at the **chunk level** in Cloud SQL, independent of ADK session lifecycle.
+For production batch processing (millions of rows via GCP Dataflow), the checkpointing strategy uses Cloud SQL + GCS instead of a local CSV:
 
 ```
 Checkpointing layer (Cloud SQL)      ADK layer (InMemorySessionService)
@@ -1419,10 +1359,30 @@ Checkpointing layer (Cloud SQL)      ADK layer (InMemorySessionService)
 └───────────────────────┘           └───────────────────────────────┘
 ```
 
-This separation means:
-- ADK sessions are **stateless per row** — no session storage cost at scale
-- Checkpoint progress is **durable in Cloud SQL** — survives job restarts
-- The two concerns don't interfere with each other
+**Key differences from local mode:**
+- Progress tracked in Cloud SQL (durable, queryable)
+- Partial results written to GCS as chunk CSVs
+- Dataflow handles worker-level retries automatically
+- Application-level checkpointing handles job-level restart
+
+#### 10.4.1 Idempotency (Production)
+
+| Component | Idempotency Mechanism |
+|-----------|----------------------|
+| Cloud SQL results | `UNIQUE (job_id, row_index)` constraint + `ON CONFLICT DO UPDATE` (upsert) |
+| GCS partial CSVs | Overwrite same chunk filename (GCS write is atomic per object) |
+| Job progress | `UPDATE` is naturally idempotent |
+| LLM calls | Deterministic (temperature=0) + response cache in Redis |
+| ADK session state | `InMemorySessionService` — fresh per row, no stale state |
+
+#### 10.4.2 Monitoring Checkpoints (Production)
+
+| Metric | Purpose |
+|--------|---------|
+| `address_checkpoint_committed_total` | Track checkpointing frequency |
+| `address_checkpoint_duration_seconds` | Detect slow commits (DB bottleneck) |
+| `address_job_resume_total` | How often jobs are resumed (crash frequency indicator) |
+| `address_chunk_reprocess_total` | Rows re-processed after resume (waste indicator) |
 
 ---
 

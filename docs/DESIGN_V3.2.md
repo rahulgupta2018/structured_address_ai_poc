@@ -943,7 +943,7 @@ with beam.Pipeline(options=pipeline_options) as p:
 
 ### 9.5 Local Batch Mode: `batch_runner.py`
 
-For local development and testing, `batch_runner.py` reads an Excel/CSV file from `data/samples/`, loops over each row, runs the ADK pipeline, and writes results back. This replaces the POC's `main.py` + `io_excel.py` flow.
+For local development and testing, `batch_runner.py` reads an Excel/CSV file from `data/inputs/`, loops over each row, runs the ADK pipeline, and writes results back. 
 
 #### 9.5.1 File I/O Services
 
@@ -1803,9 +1803,11 @@ structured_address_ai/                 # Repository root
 │   ├── DESIGN_V2.0.md                # Production infrastructure
 │   └── DESIGN_V3.2.md                # This document — ADK pipeline architecture
 │
-├── batch_runner.py                    # CLI entry point: read file → agent loop → write output
+├── src/
+│   └── batch_runner.py                # CLI entry point: python -m src.batch_runner
 ├── requirements.txt
-├── .env                               # API keys, model config (at root — loaded by ADK)
+├── .env                               # API keys, model config (git-ignored)
+├── .env.example                       # Template with all configurable env vars
 ├── .gitignore
 └── README.md
 ```

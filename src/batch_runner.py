@@ -35,6 +35,7 @@ import logging
 import os
 import sys
 import time
+import uuid
 from datetime import datetime
 from pathlib import Path
 
@@ -66,6 +67,7 @@ async def _process_row(
     row_index: int,
     row: dict,
     semaphore: asyncio.Semaphore,
+    job_id: str = "",
 ) -> tuple[int, dict]:
     """Process a single address row through the full agent pipeline.
 
@@ -81,6 +83,8 @@ async def _process_row(
             "address_2": row.get("address_2") or "",
             "address_3": row.get("address_3") or "",
             "country_code": (row.get("country_code") or "").strip().upper(),
+            "row_index": row_index,
+            "job_id": job_id,
             "warnings": [],
         }
 
@@ -162,6 +166,9 @@ async def run_batch(
     Returns:
         Path to the written output file.
     """
+    # Single job_id for the entire batch run (V3.2 §8.1)
+    job_id = str(uuid.uuid4())
+
     input_file = Path(input_path)
     if not input_file.exists():
         logger.error("Input file not found: %s", input_file)
@@ -178,6 +185,7 @@ async def run_batch(
 
     # Read input
     logger.info("Reading input: %s", input_file)
+    logger.info("Job ID: %s", job_id)
     rows = read_input(str(input_file))
     total = len(rows)
     logger.info("Total rows: %d | concurrency: %d | batch_size: %d",
@@ -212,7 +220,7 @@ async def run_batch(
             idx = batch_start + i  # 0-based global index
             tasks.append(
                 asyncio.create_task(
-                    _process_row(runner, session_service, idx + 1, row, semaphore),
+                    _process_row(runner, session_service, idx + 1, row, semaphore, job_id),
                     name=f"row-{idx + 1}",
                 )
             )

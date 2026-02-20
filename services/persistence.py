@@ -58,6 +58,10 @@ def persist(state: dict) -> dict:
         # Mismatch info
         "mismatch_detected": state.get("mismatch_detected", False),
         "suggested_country_code": state.get("suggested_country_code"),
+        # LLM usage (0 for deterministic-only rows)
+        "llm_calls": state.get("llm_calls", 0),
+        "llm_prompt_tokens": state.get("llm_prompt_tokens", 0),
+        "llm_completion_tokens": state.get("llm_completion_tokens", 0),
     }
 
     state["final_result"] = final_result

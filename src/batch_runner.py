@@ -1,18 +1,27 @@
 """
 Batch runner — CLI entry point for the address pipeline (V3.2 §9.5).
 
-Reads an input file (Excel / CSV), runs each row through the ADK
-agent pipeline **concurrently**, and writes the results to an output file.
+Two-pass hybrid architecture
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+**Pass 1 — Deterministic (pure Python, zero ADK overhead):**
+    Runs Steps 0-5 as direct service-function calls on every row.
+    Rows that resolve deterministically (~57%) proceed immediately to
+    Steps 7-8 (revalidation + persist), also as direct calls.
+    Cost: ~1-5 ms per row.
+
+**Pass 2 — LLM-only (ADK sessions):**
+    Only unresolved rows (~43%) get ADK sessions for the full LLM
+    agent (Step 6) + revalidation (Step 7) + persist (Step 8).
+    Cost: ~10-15 s per row (local Ollama).
+
+This gives identical quality to the full ADK pipeline but avoids
+creating sessions, events, and state-deltas for deterministic rows —
+a 20-100× speedup for those rows.
 
 Concurrency model
 ~~~~~~~~~~~~~~~~~
-Rows are dispatched in **async batches** controlled by:
-  --concurrency N   (default 4) — max rows processed simultaneously.
-
-Each row gets its own ADK session, so they are fully independent.
-Deterministic-only rows (~60%) complete in <1s and don't need the LLM.
-LLM rows (~40%) take 10-15s but run in parallel (up to the semaphore
-limit).
+LLM rows are dispatched in **async batches** controlled by:
+  --concurrency N   (default 4) — max LLM rows processed simultaneously.
 
 For local Ollama, set OLLAMA_NUM_PARALLEL env var (default 1) on the
 Ollama server to allow multiple concurrent inferences:
@@ -55,6 +64,16 @@ from google.adk.sessions import InMemorySessionService
 from google.genai import types
 
 from address_pipeline_agent.agent import root_agent
+from services import (
+    address_scanner,
+    geonames_exact,
+    geonames_revalidation,
+    libpostal_parser,
+    mismatch_detector,
+    normalizer,
+    persistence,
+    postal_lookup,
+)
 from services.io_reader import read_input
 from services.io_writer import write_output
 from utils.config import CHECKPOINT_INTERVAL_ROWS, OUTPUT_DIR
@@ -143,41 +162,118 @@ def _load_checkpoint(ckpt_file: Path) -> dict[int, dict]:
     return loaded
 
 
-# ── Per-row processing ───────────────────────────────────────────────────────
+# ── Pass 1: Deterministic resolution (pure Python, no ADK) ──────────────────
 
 
-async def _process_row(
+def _resolve_deterministic(row: dict, row_index: int, job_id: str = "") -> dict:
+    """Run Steps 0-5 + 7 + 8 as direct service calls.
+
+    If the row resolves deterministically (exact match or scan match),
+    the full result dict is returned with state["final_result"] populated.
+    If unresolved, returns the partial state dict with status="unresolved"
+    so the caller knows to route it to the LLM pass.
+
+    This avoids all ADK overhead (session creation, event streaming,
+    state-delta computation) for the ~57% of rows that don't need LLM.
+    """
+    state = {
+        "address_1": row.get("address_1") or "",
+        "address_2": row.get("address_2") or "",
+        "address_3": row.get("address_3") or "",
+        "country_code": (row.get("country_code") or "").strip().upper(),
+        "row_index": row_index,
+        "job_id": job_id,
+        "warnings": [],
+    }
+
+    # Check for empty address
+    has_address = any(
+        state.get(f"address_{i}") and str(state.get(f"address_{i}")).strip()
+        for i in range(1, 4)
+    )
+    if not has_address:
+        state["status"] = "rejected"
+        state["parser_source"] = None
+        state["warnings"].append("no_address_data")
+        logger.debug("Row %d: No address data — rejected (deterministic)", row_index)
+        # Still need revalidation + persist for consistent output
+        geonames_revalidation.revalidate(state)
+        persistence.persist(state)
+        return state
+
+    # Step 0: Preprocess
+    normalizer.preprocess(state)
+
+    # Step 1: libpostal parse
+    libpostal_parser.parse(state)
+
+    # Step 2: Postal code lookup
+    postal_lookup.lookup(state)
+
+    # Step 3: GeoNames exact match
+    geonames_exact.match(state)
+
+    if state.get("exact_match"):
+        state["status"] = "resolved"
+        state["parser_source"] = "libpostal"
+        logger.debug(
+            "Row %d: Resolved deterministically (exact): %s",
+            row_index, state.get("town_candidate"),
+        )
+        # Step 7 + 8: revalidation + persist
+        geonames_revalidation.revalidate(state)
+        persistence.persist(state)
+        return state
+
+    # Step 4: Mismatch detection
+    mismatch_detector.detect(state)
+
+    # Step 5: Address scan
+    address_scanner.scan(state)
+
+    if state.get("scan_match"):
+        state["status"] = "resolved"
+        state["parser_source"] = "geonames_scan"
+        state["town_candidate"] = state.get("scan_candidate")
+        logger.debug(
+            "Row %d: Resolved deterministically (scan): %s",
+            row_index, state.get("town_candidate"),
+        )
+        # Step 7 + 8: revalidation + persist
+        geonames_revalidation.revalidate(state)
+        persistence.persist(state)
+        return state
+
+    # Unresolved — needs LLM
+    state["status"] = "unresolved"
+    return state
+
+
+# ── Pass 2: LLM processing via ADK (only for unresolved rows) ───────────────
+
+
+async def _process_llm_row(
     runner: Runner,
     session_service: InMemorySessionService,
     row_index: int,
-    row: dict,
+    state: dict,
     semaphore: asyncio.Semaphore,
-    job_id: str = "",
 ) -> tuple[int, dict]:
-    """Process a single address row through the full agent pipeline.
+    """Run the full ADK pipeline for a single unresolved row.
 
-    Uses a semaphore to limit concurrency across all in-flight rows.
-    Returns (row_index, result_dict) so the caller can place results
-    in order.
+    The state dict already has Steps 0-5 completed from Pass 1.
+    The ADK agent will run Step 6 (LLM) + Step 7 (revalidation) + Step 8 (persist).
+    We pass the full pre-computed state so no deterministic work is repeated.
     """
     async with semaphore:
         session_id = f"row_{row_index:06d}"
 
-        initial_state = {
-            "address_1": row.get("address_1") or "",
-            "address_2": row.get("address_2") or "",
-            "address_3": row.get("address_3") or "",
-            "country_code": (row.get("country_code") or "").strip().upper(),
-            "row_index": row_index,
-            "job_id": job_id,
-            "warnings": [],
-        }
-
+        # Pass the full pre-computed state from Pass 1
         await session_service.create_session(
             app_name=APP_NAME,
             user_id=USER_ID,
             session_id=session_id,
-            state=initial_state,
+            state=state,
         )
 
         trigger = types.Content(
@@ -185,7 +281,8 @@ async def _process_row(
             parts=[types.Part(text="Process this address.")],
         )
 
-        # Run the agent pipeline
+        # Run the agent pipeline — deterministic_resolver will see
+        # status="unresolved" and the orchestrator routes to LLM
         async for event in runner.run_async(
             user_id=USER_ID,
             session_id=session_id,
@@ -206,10 +303,10 @@ async def _process_row(
 
         logger.warning("Row %d: no final_result in session state", row_index)
         return (row_index, {
-            "address_1": initial_state["address_1"],
-            "address_2": initial_state["address_2"],
-            "address_3": initial_state["address_3"],
-            "country_code": initial_state["country_code"],
+            "address_1": state["address_1"],
+            "address_2": state["address_2"],
+            "address_3": state["address_3"],
+            "country_code": state["country_code"],
             "status": "rejected",
             "confidence_score": 0.0,
             "warnings": "pipeline_error",
@@ -299,85 +396,160 @@ async def run_batch(
         else:
             logger.info("No usable checkpoint found — starting from scratch")
 
-    # ── Set up ADK runner ────────────────────────────────────────
-    session_service = InMemorySessionService()
-    runner = Runner(
-        app_name=APP_NAME,
-        agent=root_agent,
-        session_service=session_service,
-    )
-
-    semaphore = asyncio.Semaphore(concurrency)
-    completed = skipped
     t0 = time.perf_counter()
 
-    # Process in batches so we can checkpoint between them
-    for batch_start in range(0, total, batch_size):
-        batch_end = min(batch_start + batch_size, total)
+    # ══════════════════════════════════════════════════════════════
+    # PASS 1: Deterministic resolution (pure Python, no ADK)
+    # ══════════════════════════════════════════════════════════════
+    # Run Steps 0-5 + 7 + 8 as direct function calls for every
+    # pending row. Resolved rows go straight into results[].
+    # Unresolved rows are collected for the LLM pass.
+    #
+    # This is the key optimisation: ~57% of rows resolve here in
+    # microseconds, avoiding all ADK session/event overhead.
+    # ──────────────────────────────────────────────────────────────
 
-        # Collect rows that still need processing in this batch
-        pending: list[tuple[int, dict]] = []
-        for i in range(batch_start, batch_end):
-            if results[i] is None:
-                pending.append((i + 1, rows[i]))  # (1-based row_index, row)
+    llm_queue: list[tuple[int, dict]] = []  # (row_index, partial_state)
+    n_deterministic = 0
+    n_rejected = 0
 
-        if not pending:
-            logger.info(
-                "Batch %d–%d of %d — all rows already done (checkpoint), skipping",
-                batch_start + 1, batch_end, total,
-            )
+    logger.info("Pass 1: Deterministic resolution (%d pending rows) …", total - skipped)
+    t_det = time.perf_counter()
+
+    for i in range(total):
+        if results[i] is not None:
+            continue  # already done (checkpoint resume)
+
+        row = rows[i]
+        row_index = i + 1  # 1-based
+
+        try:
+            state = _resolve_deterministic(row, row_index, job_id)
+        except Exception:
+            logger.exception("Row %d: deterministic pass crashed", row_index)
+            results[i] = _make_error_result(row)
+            n_rejected += 1
             continue
 
-        logger.info(
-            "Batch %d–%d of %d (%d pending, %d already done)",
-            batch_start + 1, batch_end, total,
-            len(pending), (batch_end - batch_start) - len(pending),
-        )
-
-        # Launch pending rows concurrently
-        tasks = []
-        for row_index, row in pending:
-            tasks.append(
-                asyncio.create_task(
-                    _process_row(runner, session_service, row_index, row, semaphore, job_id),
-                    name=f"row-{row_index}",
-                )
-            )
-
-        # Gather results — exceptions are returned, not raised
-        task_results = await asyncio.gather(*tasks, return_exceptions=True)
-
-        for j, task_result in enumerate(task_results):
-            row_index, row = pending[j]
-            global_idx = row_index - 1  # back to 0-based
-
-            if isinstance(task_result, Exception):
-                logger.exception(
-                    "Row %d failed: %s", row_index, task_result,
-                )
-                results[global_idx] = _make_error_result(row)
+        if state.get("status") == "unresolved":
+            # Needs LLM — queue for Pass 2
+            llm_queue.append((row_index, state))
+        else:
+            # Deterministic resolution complete — store final_result
+            final_result = state.get("final_result")
+            if final_result:
+                results[i] = final_result
+                n_deterministic += 1
             else:
-                _, result_dict = task_result
-                results[global_idx] = result_dict
+                results[i] = _make_error_result(row)
+                n_rejected += 1
 
-            completed += 1
+    det_elapsed = time.perf_counter() - t_det
+    logger.info(
+        "Pass 1 complete: %d deterministic + %d rejected in %.1fs "
+        "(%.0f rows/sec). %d rows queued for LLM.",
+        n_deterministic, n_rejected, det_elapsed,
+        (n_deterministic + n_rejected) / det_elapsed if det_elapsed > 0 else 0,
+        len(llm_queue),
+    )
 
-        # Progress
-        elapsed = time.perf_counter() - t0
-        rate = (completed - skipped) / elapsed if elapsed > 0 else 0
+    # ══════════════════════════════════════════════════════════════
+    # PASS 2: LLM processing via ADK (only unresolved rows)
+    # ══════════════════════════════════════════════════════════════
+    # Only unresolved rows get ADK sessions. The pre-computed state
+    # from Pass 1 is injected as session state so Steps 0-5 are NOT
+    # re-run — the DeterministicResolverAgent will see the existing
+    # state and the orchestrator routes directly to the LLM agent.
+    # ──────────────────────────────────────────────────────────────
+
+    if llm_queue:
         logger.info(
-            "Progress: %d/%d completed (%.1f new rows/sec, elapsed %.1fs)",
-            completed, total, rate, elapsed,
+            "Pass 2: LLM resolution (%d rows, concurrency=%d, batch_size=%d) …",
+            len(llm_queue), concurrency, batch_size,
         )
 
-        # Write rolling checkpoint after every batch
-        if batch_end < total:
-            n_saved = _write_checkpoint(results, ckpt_file)
+        session_service = InMemorySessionService()
+        runner = Runner(
+            app_name=APP_NAME,
+            agent=root_agent,
+            session_service=session_service,
+        )
+        semaphore = asyncio.Semaphore(concurrency)
+
+        completed_llm = 0
+        t_llm = time.perf_counter()
+
+        # Process LLM rows in batches for checkpointing
+        for batch_start in range(0, len(llm_queue), batch_size):
+            batch = llm_queue[batch_start : batch_start + batch_size]
+
             logger.info(
-                "Checkpoint saved: %s (%d rows). "
-                "To resume after a crash: --resume -o %s",
-                ckpt_file, n_saved, output_file,
+                "LLM batch %d–%d of %d",
+                batch_start + 1,
+                min(batch_start + batch_size, len(llm_queue)),
+                len(llm_queue),
             )
+
+            tasks = []
+            for row_index, state in batch:
+                tasks.append(
+                    asyncio.create_task(
+                        _process_llm_row(
+                            runner, session_service,
+                            row_index, state, semaphore,
+                        ),
+                        name=f"llm-row-{row_index}",
+                    )
+                )
+
+            task_results = await asyncio.gather(*tasks, return_exceptions=True)
+
+            for j, task_result in enumerate(task_results):
+                row_index, state = batch[j]
+                global_idx = row_index - 1  # back to 0-based
+
+                if isinstance(task_result, Exception):
+                    logger.exception(
+                        "Row %d LLM failed: %s", row_index, task_result,
+                    )
+                    results[global_idx] = _make_error_result(
+                        {"address_1": state.get("address_1"),
+                         "address_2": state.get("address_2"),
+                         "address_3": state.get("address_3"),
+                         "country_code": state.get("country_code")}
+                    )
+                else:
+                    _, result_dict = task_result
+                    results[global_idx] = result_dict
+
+                completed_llm += 1
+
+            # Progress for LLM pass
+            llm_elapsed = time.perf_counter() - t_llm
+            rate = completed_llm / llm_elapsed if llm_elapsed > 0 else 0
+            logger.info(
+                "LLM progress: %d/%d completed (%.2f rows/sec, elapsed %.1fs)",
+                completed_llm, len(llm_queue), rate, llm_elapsed,
+            )
+
+            # Write rolling checkpoint after every LLM batch
+            n_done = sum(1 for r in results if r is not None)
+            if batch_start + batch_size < len(llm_queue):
+                n_saved = _write_checkpoint(results, ckpt_file)
+                logger.info(
+                    "Checkpoint saved: %s (%d rows). "
+                    "To resume after a crash: --resume -o %s",
+                    ckpt_file, n_saved, output_file,
+                )
+
+        llm_total_elapsed = time.perf_counter() - t_llm
+        logger.info(
+            "Pass 2 complete: %d LLM rows in %.1fs (%.2f rows/sec)",
+            len(llm_queue), llm_total_elapsed,
+            len(llm_queue) / llm_total_elapsed if llm_total_elapsed > 0 else 0,
+        )
+    else:
+        logger.info("Pass 2: No LLM rows — all resolved deterministically!")
 
     # ── Write final output ───────────────────────────────────────
     # Replace any remaining Nones with error results (should not happen)
@@ -396,6 +568,36 @@ async def run_batch(
         elapsed, (total - skipped) / elapsed if elapsed > 0 else 0,
         output_written,
     )
+
+    # ── Batch summary: deterministic vs LLM, token usage ────────
+    n_llm = sum(1 for r in final_results if r.get("llm_calls", 0) > 0)
+    n_deterministic = sum(
+        1 for r in final_results
+        if r.get("parser_source") and r["parser_source"] != "llm"
+    )
+    n_rejected = sum(
+        1 for r in final_results if r.get("status") == "rejected"
+    )
+    total_llm_calls = sum(r.get("llm_calls", 0) for r in final_results)
+    total_prompt = sum(r.get("llm_prompt_tokens", 0) for r in final_results)
+    total_completion = sum(r.get("llm_completion_tokens", 0) for r in final_results)
+    total_tokens = total_prompt + total_completion
+    logger.info("=" * 60)
+    logger.info("BATCH SUMMARY")
+    logger.info("  Total rows:        %d", total)
+    logger.info("  Deterministic:     %d (%.0f%%)", n_deterministic,
+                100 * n_deterministic / total if total else 0)
+    logger.info("  LLM-assisted:      %d (%.0f%%)", n_llm,
+                100 * n_llm / total if total else 0)
+    logger.info("  Rejected/empty:    %d", n_rejected)
+    logger.info("  LLM calls total:   %d", total_llm_calls)
+    logger.info("  Tokens (prompt):   %d", total_prompt)
+    logger.info("  Tokens (complet.): %d", total_completion)
+    logger.info("  Tokens (total):    %d", total_tokens)
+    if n_llm > 0:
+        logger.info("  Avg calls/LLM row: %.1f", total_llm_calls / n_llm)
+        logger.info("  Avg tokens/LLM row:%.0f", total_tokens / n_llm)
+    logger.info("=" * 60)
 
     # Clean up checkpoint file after successful completion
     if ckpt_file.exists():

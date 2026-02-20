@@ -34,11 +34,11 @@ logger = logging.getLogger(__name__)
 DATA_DIR = Path(__file__).resolve().parent.parent / "data" / "reference"
 DEFAULT_DB = Path(__file__).resolve().parent.parent / "data" / "database" / "geonames.db"
 
-CITIES_FILE = DATA_DIR / "cities1000.txt"
+CITIES_FILE = DATA_DIR / "cities500.txt"
 POSTAL_FILE = DATA_DIR / "allCountries.txt"
 ADMIN1_FILE = DATA_DIR / "admin1CodesASCII.txt"
 
-# ── cities1000.txt column indices (no header) ─────────────────────────
+# ── cities500.txt column indices (no header) ──────────────────────────
 C_GEONAMEID = 0
 C_NAME = 1
 C_ASCIINAME = 2

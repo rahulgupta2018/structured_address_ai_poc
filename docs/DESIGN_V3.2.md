@@ -26,8 +26,9 @@
 15. [Benefits Summary](#15-benefits-summary)
 16. [Risks & Mitigations](#16-risks--mitigations)
 17. [Decision Record](#17-decision-record)
-18. [Appendix A: ADK Documentation References](#appendix-a-adk-documentation-references)
-19. [Appendix B: Proposed File Structure](#appendix-b-proposed-file-structure)
+18. [Tuning Parameters & LLM Cost Reduction](#18-tuning-parameters--llm-cost-reduction)
+19. [Appendix A: ADK Documentation References](#appendix-a-adk-documentation-references)
+20. [Appendix B: Proposed File Structure](#appendix-b-proposed-file-structure)
 
 ---
 
@@ -1658,6 +1659,75 @@ Steps 0–5 are **plain Python functions** called within `DeterministicResolverA
 2. **2-agent design** — only orchestrator + LLM agent. Loses isolation for Step 7 (validation) and Step 8 (I/O).
 3. **SequentialAgent orchestrator** — can't do conditional LLM skip.
 4. **Tools instead of sub-agents** — tools are LLM-callable; would make the LLM decide execution order (pure-agentic, 270× cost).
+
+---
+
+## 18. Tuning Parameters & LLM Cost Reduction
+
+The pipeline's LLM ratio (percentage of rows sent to the LLM) is the primary cost driver. All the mechanisms to reduce it are **already implemented** — the remaining work is threshold tuning against production data.
+
+### 18.1 Configurable Parameters
+
+All parameters are set via environment variables (`.env` file) with sensible defaults:
+
+| Parameter | Default | Range | Effect | Source |
+|-----------|---------|-------|--------|--------|
+| `FUZZY_MATCH_THRESHOLD` | 92 | 50–100 | Minimum RapidFuzz score to accept a scan match (Step 5). Lower → more matches, higher false-positive risk. | `utils/config.py` |
+| `FUZZY_AMBIGUITY_MARGIN` | 5 | 1–50 | Minimum score gap between #1 and #2 fuzzy candidates. Prevents ambiguous matches (e.g., "Bari" vs "Barr"). | `utils/config.py` |
+| `CONFIDENCE_EXACT_PRIMARY` | 1.00 | 0–1 | Confidence assigned to exact match on primary/ASCII city name. | `utils/config.py` |
+| `CONFIDENCE_EXACT_ALTERNATE` | 0.95 | 0–1 | Confidence assigned to exact match on alternate name. | `utils/config.py` |
+| `CONFIDENCE_FUZZY_SCAN` | 0.80 | 0–1 | Confidence assigned to fuzzy scan matches (Step 5). | `utils/config.py` |
+| `CONFIDENCE_LLM_CONFIRMED` | 0.75 | 0–1 | Confidence when LLM result is verified by GeoNames exact match. | `utils/config.py` |
+| `CONFIDENCE_LLM_FUZZY_CONFIRMED` | 0.70 | 0–1 | Confidence when LLM result is verified by fuzzy match only. | `utils/config.py` |
+| `CONFIDENCE_LLM_UNVERIFIED` | 0.40 | 0–1 | Confidence when LLM result cannot be verified in GeoNames at all. | `utils/config.py` |
+
+### 18.2 How Each Pipeline Step Reduces LLM Usage
+
+The deterministic resolver (Steps 0–5) has four mechanisms to resolve a row before it reaches the LLM:
+
+| Step | Mechanism | Implementation | What It Catches |
+|------|-----------|----------------|-----------------|
+| **Step 2** | Postal code → city hint | `services/postal_lookup.py` queries `postal_codes` table → sets `postal_town_candidate` and `postal_admin1_code` | Addresses with valid postal codes get a city candidate even when libpostal fails to extract one |
+| **Step 3** | Exact match with disambiguation | `services/geonames_exact.py` tries `libpostal_town` then `postal_town_candidate` against 230K+ city name variants. Disambiguates via admin1 code from Step 2. | Clean city names, postal-code-resolved cities, alternate names (Mumbai/Bombay) |
+| **Step 4** | Country-code mismatch detection | `services/mismatch_detector.py` checks if the city exists in *any* country when not found in the stated one → sets `suggested_country_code` | "Barisardo" tagged as Ireland → detected as Italy |
+| **Step 5** | Fuzzy n-gram scan | `services/address_scanner.py` scans raw address text against all city names for the country. Phase 1: exact n-gram matching. Phase 2: RapidFuzz fuzzy matching with ambiguity guards. | Misspellings ("Dbulin" → Dublin), city names embedded in unstructured text |
+
+### 18.3 GeoNames Database Coverage
+
+The GeoNames SQLite database (`data/database/geonames.db`) is built by `src/geonames_etl.py` from three source files:
+
+| Source File | Records | What It Provides |
+|-------------|---------|------------------|
+| `cities500.txt` (pop ≥ 500) | 229,680 cities | Primary city lookup + alternate names (1.1M name variants) |
+| `allCountries.txt` | 1,826,619 postal codes | Postal code → city + admin1 region mapping |
+| `admin1CodesASCII.txt` | 3,862 admin1 regions | Admin1 code → region name mapping (for disambiguation) |
+
+Total database size: **329 MB**.
+
+To rebuild after changing the source file:
+
+```bash
+python -m src.geonames_etl              # Rebuilds data/database/geonames.db
+python -m src.geonames_etl --db /path.db # Custom output path
+```
+
+### 18.4 Tuning Strategy
+
+Recommended approach for production threshold tuning:
+
+1. **Baseline:** Run the 32K-row batch with default settings (`FUZZY_MATCH_THRESHOLD=92`, `FUZZY_AMBIGUITY_MARGIN=5`). Record the LLM ratio from the BATCH SUMMARY log.
+
+2. **Lower threshold experiment:** Set `FUZZY_MATCH_THRESHOLD=88` in `.env` and re-run. Compare:
+   - Did the LLM ratio drop? (Good — more rows resolved deterministically)
+   - Did any previously-correct rows get wrong cities? (Bad — threshold too low)
+
+3. **Tighten ambiguity margin:** If false positives appear, raise `FUZZY_AMBIGUITY_MARGIN` from 5 to 8. This rejects matches where the top two candidates are too close.
+
+4. **Validate:** Spot-check the output CSV for rows where `parser_source=geonames_scan` — these are the fuzzy-matched rows most sensitive to threshold changes.
+
+5. **Production target:** Aim for **15–30% LLM ratio** (down from 54% on the 13-row adversarial test set). Real production data with well-formed addresses should naturally have a much lower LLM ratio than our deliberately adversarial test set.
+
+> **Key insight:** The 13-row test file is intentionally adversarial — wrong countries, person names instead of addresses, minimal data. Production data with real addresses will have a significantly higher deterministic resolution rate.
 
 ---
 

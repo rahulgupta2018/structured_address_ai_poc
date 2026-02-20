@@ -79,10 +79,10 @@ Download the three GeoNames source files into `data/reference/`, then run the ET
 ```bash
 # 1. Download source files (one-time, ~250 MB total)
 cd data/reference
-curl -O https://download.geonames.org/export/dump/cities1000.zip
+curl -O https://download.geonames.org/export/dump/cities500.zip
 curl -O https://download.geonames.org/export/zip/allCountries.zip
 curl -O https://download.geonames.org/export/dump/admin1CodesASCII.txt
-unzip cities1000.zip        # → cities1000.txt
+unzip cities500.zip          # → cities500.txt  (229K cities, pop ≥ 500)
 unzip allCountries.zip       # → allCountries.txt
 cd ../..
 
@@ -120,6 +120,10 @@ ollama pull qwen2.5-coder:14b
 
 # Or call Python directly
 python -m src.batch_runner data/input/test_addresses.xlsx -c 4 -b 5
+
+# Run test scripts 
+.venv/bin/python -m pytest tests/test_services/test_single_row_cost.py -v -s 2>&1
+.venv/bin/python -m pytest tests/test_services/test_single_row_cost.py -v -s -W ignore::DeprecationWarning 2>&1 | tee logs/test_cost.log
 ```
 
 ### ADK Dev UI

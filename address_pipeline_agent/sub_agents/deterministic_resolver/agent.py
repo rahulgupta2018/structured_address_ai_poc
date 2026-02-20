@@ -59,6 +59,23 @@ class DeterministicResolverAgent(BaseAgent):
         self, ctx: InvocationContext
     ) -> AsyncGenerator[Event, None]:
         state = ctx.session.state
+        ri = state.get("row_index", "?")
+
+        # ── Fast exit: skip if Pass 1 already ran deterministic steps ──
+        # When batch_runner's two-pass architecture pre-computes Steps 0-5
+        # and injects the result as session state, we detect this via
+        # status=unresolved + raw_address already populated.  No need to
+        # re-run the deterministic pipeline.
+        if state.get("status") == "unresolved" and state.get("raw_address"):
+            logger.debug(
+                "Row %s: Deterministic steps already completed (two-pass). Skipping.",
+                ri,
+            )
+            yield _make_event(
+                self.name,
+                "Deterministic steps already done — skipping to LLM.",
+            )
+            return
 
         # Snapshot state before mutations so we can compute a delta
         snapshot = dict(state)
@@ -75,6 +92,7 @@ class DeterministicResolverAgent(BaseAgent):
             state["status"] = "rejected"
             state["parser_source"] = None
             state["warnings"].append("no_address_data")
+            logger.info("Row %s: No address data — rejected", ri)
             yield _make_event(
                 self.name,
                 "No address data — rejected.",
@@ -98,8 +116,8 @@ class DeterministicResolverAgent(BaseAgent):
             state["status"] = "resolved"
             state["parser_source"] = "libpostal"
             logger.debug(
-                "Resolved deterministically (exact): %s",
-                state.get("town_candidate"),
+                "Row %s: Resolved deterministically (exact): %s",
+                ri, state.get("town_candidate"),
             )
             yield _make_event(
                 self.name,
@@ -119,8 +137,8 @@ class DeterministicResolverAgent(BaseAgent):
             state["parser_source"] = "geonames_scan"
             state["town_candidate"] = state.get("scan_candidate")
             logger.debug(
-                "Resolved deterministically (scan): %s",
-                state.get("town_candidate"),
+                "Row %s: Resolved deterministically (scan): %s",
+                ri, state.get("town_candidate"),
             )
             yield _make_event(
                 self.name,

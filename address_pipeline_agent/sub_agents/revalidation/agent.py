@@ -46,10 +46,12 @@ class RevalidationAgent(BaseAgent):
         self, ctx: InvocationContext
     ) -> AsyncGenerator[Event, None]:
         state = ctx.session.state
+        ri = state.get("row_index", "?")
         snapshot = dict(state)
 
         # Skip revalidation for rejected rows
         if state.get("status") == "rejected":
+            logger.debug("Row %s: Skipped revalidation — rejected", ri)
             yield _make_event(self.name, "Skipped — row rejected.")
             return
 
@@ -57,6 +59,7 @@ class RevalidationAgent(BaseAgent):
 
         confidence = state.get("confidence", 0.0)
         status = state.get("status", "unknown")
+        logger.debug("Row %s: Revalidation complete: status=%s, confidence=%.2f", ri, status, confidence)
 
         yield _make_event(
             self.name,

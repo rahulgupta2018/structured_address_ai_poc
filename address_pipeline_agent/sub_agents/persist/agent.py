@@ -46,6 +46,7 @@ class PersistAgent(BaseAgent):
         self, ctx: InvocationContext
     ) -> AsyncGenerator[Event, None]:
         state = ctx.session.state
+        ri = state.get("row_index", "?")
         snapshot = dict(state)
 
         persistence.persist(state)
@@ -53,6 +54,7 @@ class PersistAgent(BaseAgent):
         result = state.get("final_result", {})
         town = result.get("town", "N/A")
         status = result.get("status", "unknown")
+        logger.debug("Row %s: Persist → town=%s, status=%s", ri, town, status)
 
         yield _make_event(
             self.name,

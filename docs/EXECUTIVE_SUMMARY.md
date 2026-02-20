@@ -37,7 +37,7 @@ Our systems receive millions of address records from customers and partners acro
 Build an **intelligent address parsing pipeline** that:
 
 1. Takes a raw address row (free-form text + country code)
-2. Extracts the correct **city/town name** by cross-referencing a geographic database of 200,000+ cities worldwide
+2. Extracts the correct **city/town name** by cross-referencing a geographic database of 230,000+ cities worldwide
 3. Detects and corrects **wrong country codes**
 4. Assigns a **confidence score** (0–100%) to every result
 5. Flags low-confidence rows for **human review** instead of guessing
@@ -134,7 +134,7 @@ Not every address goes through all 8 steps:
 | Technology | What It Does | Why We Chose It |
 |-----------|-------------|----------------|
 | **Google ADK** (Agent Development Kit) | A framework from Google for building AI-powered workflows. It wires our 8 steps together and provides a built-in web interface for testing. | Write once, run anywhere — same code works on a laptop, as a web API, or in cloud batch processing. Free debugging tools included. |
-| **GeoNames Database** | A free, open-source database of 200,000+ cities worldwide with postal codes, regions, and population data. We run it as a local SQLite database (304 MB). | Gives us ground truth for city verification. No API calls needed — everything is local and fast. |
+| **GeoNames Database** | A free, open-source database of 230,000+ cities worldwide (population ≥ 500) with postal codes, regions, and population data. We run it as a local SQLite database (329 MB). | Gives us ground truth for city verification. No API calls needed — everything is local and fast. |
 | **Ollama** (local AI) | Runs an AI model on the developer's own machine — no cloud AI costs during development and testing. | Free to run, keeps data on-premises, fast iteration during development. |
 | **Google Gemini** (production AI) | Google's cloud AI model, used in production for the ~15% of addresses that need AI reasoning. | Fast, cost-effective, integrates natively with Google's cloud tools. |
 | **LiteLLM** | A translation layer that lets us swap between local AI (Ollama) and cloud AI (Gemini) with one line of configuration. | No code changes when moving from laptop to production. |
@@ -440,7 +440,7 @@ The progression is seamless — no re-architecture required at any stage.
 |-----------|--------|
 | 8-step pipeline logic (Steps 0–8) | ✅ Implemented & tested |
 | Agent architecture (5 agents, conditional routing) | ✅ Implemented & tested |
-| GeoNames database (200K+ cities, postal codes, regions) | ✅ Loaded (304 MB SQLite) |
+| GeoNames database (230K+ cities, postal codes, regions) | ✅ Loaded (329 MB SQLite) |
 | Local AI integration (Ollama) | ✅ Working — qwen2.5-coder:14b model |
 | Batch processing with crash recovery | ✅ Implemented — checkpoint + resume |
 | 13-row test file end-to-end | ✅ All rows processed correctly |
@@ -452,13 +452,107 @@ The progression is seamless — no re-architecture required at any stage.
 
 ---
 
-## 11. Cost & Efficiency Highlights
+## 11. Cost & Efficiency — Detailed Breakdown
 
-| Approach | Estimated Cost per 1M Rows | Notes |
-|----------|---------------------------|-------|
-| **Pure AI** (every row through LLM) | ~$2,700 | 270× more expensive. Non-deterministic — results vary between runs. |
-| **Our approach** (rules first, AI for 15%) | ~$10 | Only ~150K rows hit the AI. Deterministic results for 85% of rows. |
-| **Manual processing** | ~$50,000+ | Operations team at ~$0.05/row. Days of elapsed time. |
+### 11.1 How LLM Pricing Works
+
+Cloud AI providers charge **per token** (roughly 1 token ≈ ¾ of a word). Every LLM call has two billable parts:
+
+| Part | What It Is | Typical Share |
+|------|-----------|---------------|
+| **Prompt tokens** | Everything *sent* to the model — instructions, address data, tool results | ~97% of tokens |
+| **Completion tokens** | The model's *response* — the resolved address JSON | ~3% of tokens |
+
+Completion tokens cost 2–4× more per token than prompt tokens, but since they're only ~3% of volume the prompt cost dominates.
+
+### 11.2 Measured Token Usage (from 13-row POC test)
+
+Our pipeline was instrumented to track exact token consumption per row:
+
+| Metric | Value |
+|--------|-------|
+| Total rows processed | 13 |
+| Resolved by rules alone (Steps 1–5) | 6 (46%) — **zero AI cost** |
+| Sent to LLM (Step 6) | 7 (54%) |
+| Average LLM calls per LLM row | 2.0 |
+| Prompt tokens (total) | 20,601 |
+| Completion tokens (total) | 692 |
+| **Total tokens** | **21,293** |
+
+> **Why 2 calls per row?** The LLM often makes a GeoNames tool call first (e.g., "look up München in Germany"), receives the result, then provides its final answer. Each round-trip is one call.
+
+**How the key numbers are calculated:**
+
+```
+Prompt token share   = 20,601 ÷ 21,293 = 96.7% ≈ 97%
+Completion share     =    692 ÷ 21,293 =  3.3% ≈  3%
+Avg tokens / LLM row = 21,293 ÷ 7 LLM rows = 3,042
+```
+
+**Why are prompt tokens 97% of the total?** Each LLM call sends a large context:
+
+| What's sent to the model | Approx. tokens |
+|--------------------------|---------------|
+| System prompt (full instructions) | ~800 |
+| Tool definitions (5 GeoNames tools) | ~500 |
+| Conversation history (grows each turn) | ~200–500 per turn |
+| **Total sent per call** | **~1,500–1,800** |
+
+The model's answer is a small JSON — `{"town": "Munich", "confidence": 0.9, ...}` — only ~50–100 tokens. So across 2 calls with growing context, prompt tokens heavily dominate.
+
+### 11.3 Cost Projection for 30 Million Rows
+
+**Step 1 — How many rows need the LLM?**
+
+| Scenario | LLM % | LLM Rows |
+|----------|-------|----------|
+| Current POC ratio | 54% | 16,200,000 |
+| With improved rules (target) | 30% | 9,000,000 |
+| Best-case (optimistic) | 15% | 4,500,000 |
+
+**Step 2 — Token volume** (at 3,042 tokens/LLM row)
+
+| Scenario | LLM Rows | Total Tokens | Prompt Tokens (97%) | Completion Tokens (3%) |
+|----------|----------|-------------|---------------------|----------------------|
+| 54% LLM | 16.2M | 49.3 billion | 47.8B | 1.5B |
+| 30% LLM | 9.0M | 27.4 billion | 26.6B | 0.8B |
+| 15% LLM | 4.5M | 13.7 billion | 13.3B | 0.4B |
+
+**Step 3 — Cost by Google Gemini model**
+
+| Model | Prompt ($/1M tokens) | Completion ($/1M tokens) | 54% LLM (16.2M rows) | 30% LLM (9M rows) | 15% LLM (4.5M rows) |
+|-------|---------------------|-------------------------|----------------------|--------------------|--------------------|
+| **Gemini 2.0 Flash** | $0.10 | $0.40 | **$5,400** | **$3,000** | **$1,500** |
+| **Gemini 1.5 Flash** | $0.075 | $0.30 | **$4,000** | **$2,250** | **$1,100** |
+| **Gemini 1.5 Pro** | $1.25 | $5.00 | **$67,200** | **$37,300** | **$18,700** |
+| **Gemini 2.5 Pro** | $1.25 | $10.00 | **$74,700** | **$41,500** | **$20,800** |
+
+**Step 4 — Comparison with non-Google alternatives**
+
+| Model | Prompt ($/1M tokens) | Completion ($/1M tokens) | 30% LLM scenario |
+|-------|---------------------|-------------------------|-------------------|
+| GPT-4o mini | $0.15 | $0.60 | **$4,500** |
+| GPT-4o | $2.50 | $10.00 | **$74,500** |
+| Claude 3.5 Sonnet | $3.00 | $15.00 | **$91,800** |
+
+### 11.4 Recommended Model
+
+**Gemini 2.0 Flash** is the recommended production model:
+
+- **Cheapest cost-effective option:** ~$3,000–$5,400 for 30M rows
+- **Fastest inference:** optimised for high-throughput batch workloads
+- **Native ADK integration:** our pipeline uses Google ADK — Gemini works out of the box via `LLM_MODEL=gemini/gemini-2.0-flash`
+- **Quality:** Flash models are purpose-built for structured tasks like address parsing; the Pro models add reasoning capability we don't need
+
+### 11.5 Cost Comparison — Three Approaches at 30M Rows
+
+| Approach | AI Cost | Processing Time | Total Cost (incl. infra) |
+|----------|---------|----------------|--------------------------|
+| **Manual processing** (operations team) | $0 | Weeks–months | **~$1,500,000+** at $0.05/row |
+| **Pure AI** (every row through Gemini Flash) | ~$9,100 | ~3 days | **~$10,000** (but non-deterministic) |
+| **Our approach** (rules + AI for 30%) | ~$3,000 | ~3 days | **~$4,000** (deterministic for 70%) |
+
+> **Key insight:** Our rules-first design is ~3× cheaper than pure AI and delivers deterministic, reproducible results for the majority of rows. The AI is reserved for genuinely ambiguous cases.
 
 ---
 
@@ -470,7 +564,7 @@ The progression is seamless — no re-architecture required at any stage.
 | Google ADK framework is new (released 2025) | Medium | Medium | All business logic is in plain Python functions, independent of the framework. If ADK is ever discontinued, we can rewire in ~2 days. |
 | Crash during large batch run | Medium | Low | Automatic checkpointing every 500 rows. Resume picks up where it left off. Maximum loss: ~8 minutes of work. |
 | AI model performance degrades | Low | Medium | Temperature set to 0 (deterministic). AI responses are always verified against the database. Monitoring flags anomalies. |
-| GeoNames database gaps (missing cities) | Low | Low | GeoNames covers 200K+ cities worldwide (population > 5K). Edge cases go to human review. Database is updatable. |
+| GeoNames database gaps (missing cities) | Low | Low | GeoNames covers 230K+ cities worldwide (population ≥ 500). Edge cases go to human review. Database is updatable. |
 
 ---
 

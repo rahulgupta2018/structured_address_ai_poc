@@ -264,7 +264,13 @@ class LlmAddressParserAgent(BaseAgent):
         self, ctx: InvocationContext
     ) -> AsyncGenerator[Event, None]:
         state = ctx.session.state
+        ri = state.get("row_index", "?")
         snapshot = dict(state)
+
+        # ── Per-row LLM usage counters ───────────────────────────────
+        llm_calls = 0
+        prompt_tokens_total = 0
+        completion_tokens_total = 0
 
         # Build messages
         messages = [
@@ -289,8 +295,14 @@ class LlmAddressParserAgent(BaseAgent):
                     timeout=LLM_TIMEOUT_SECONDS,
                 )
             except Exception as exc:
-                logger.warning("LiteLLM call failed (turn %d): %s", turn, exc)
+                logger.warning("Row %s: LiteLLM call failed (turn %d): %s", ri, turn, exc)
                 break
+
+            llm_calls += 1
+            usage = getattr(response, "usage", None)
+            if usage:
+                prompt_tokens_total += getattr(usage, "prompt_tokens", 0) or 0
+                completion_tokens_total += getattr(usage, "completion_tokens", 0) or 0
 
             choice = response.choices[0]
             message = choice.message
@@ -377,7 +389,7 @@ class LlmAddressParserAgent(BaseAgent):
 
             # Empty stop → give up
             if choice.finish_reason == "stop" and not content_text.strip():
-                logger.warning("LLM returned empty response on turn %d", turn)
+                logger.warning("Row %s: LLM returned empty response on turn %d", ri, turn)
                 break
 
         # ── Build LlmAddressOutput and store in state ────────────────────
@@ -386,7 +398,7 @@ class LlmAddressParserAgent(BaseAgent):
                 validated = LlmAddressOutput(**llm_result)
                 result_dict = validated.model_dump()
             except Exception as exc:
-                logger.warning("LlmAddressOutput validation: %s — salvaging", exc)
+                logger.warning("Row %s: LlmAddressOutput validation: %s — salvaging", ri, exc)
                 result_dict = {
                     "town": llm_result.get("town") or llm_result.get("town_candidate") or "",
                     "postal_code": llm_result.get("postal_code"),
@@ -402,12 +414,22 @@ class LlmAddressParserAgent(BaseAgent):
             if scc:
                 state["suggested_country_code"] = scc
             logger.info(
-                "LLM resolved: town=%s, confidence=%.2f",
-                result_dict.get("town"), result_dict.get("confidence", 0),
+                "Row %s: LLM resolved: town=%s, confidence=%.2f",
+                ri, result_dict.get("town"), result_dict.get("confidence", 0),
             )
         else:
-            logger.warning("LLM produced no usable result after %d turns", _MAX_TURNS)
+            logger.warning("Row %s: LLM produced no usable result after %d turns", ri, _MAX_TURNS)
             state["llm_result"] = None
+
+        # Store LLM usage stats in session state for downstream reporting
+        state["llm_calls"] = llm_calls
+        state["llm_prompt_tokens"] = prompt_tokens_total
+        state["llm_completion_tokens"] = completion_tokens_total
+        logger.info(
+            "Row %s: LLM usage: %d call(s), %d prompt + %d completion = %d tokens",
+            ri, llm_calls, prompt_tokens_total, completion_tokens_total,
+            prompt_tokens_total + completion_tokens_total,
+        )
 
         # Compute state delta
         delta = {}

@@ -113,7 +113,8 @@ class AddressPipelineAgent(BaseAgent):
                         user_msg[:80],
                     )
 
-        row_key = f"{state.get('country_code', '??')}|{state.get('address_1', '?')[:30]}"
+        ri = state.get('row_index', '?')
+        row_key = f"Row {ri} {state.get('country_code', '??')}|{state.get('address_1', '?')[:30]}"
         logger.info("Pipeline start: %s", row_key)
 
         # ── Step 1: Deterministic resolver ─────────────────────────────

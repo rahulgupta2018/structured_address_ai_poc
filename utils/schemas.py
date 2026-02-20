@@ -87,16 +87,22 @@ class LlmAddressOutput(BaseModel):
       don't cause a hard ValidationError that crashes the pipeline.
     """
 
-    town: str = Field(default="", description="The resolved town/city name")
+    town: Optional[str] = Field(default="", description="The resolved town/city name")
     postal_code: Optional[str] = Field(
         default=None, description="Postal/ZIP code if identified"
     )
     confidence: float = Field(
         default=0.0, description="Confidence score 0.0–1.0"
     )
-    reasoning: str = Field(
+    reasoning: Optional[str] = Field(
         default="", description="Brief explanation of how the town was determined"
     )
+
+    @field_validator("town", "reasoning", mode="before")
+    @classmethod
+    def coerce_none_to_empty(cls, v: Any) -> str:
+        """Accept None from the LLM and coerce to empty string."""
+        return v if v is not None else ""
     suggested_country_code: Optional[str] = Field(
         default=None,
         description="If the town belongs to a different country than the input "

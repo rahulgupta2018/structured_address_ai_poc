@@ -1,3 +1,2 @@
 data/database/geonames.db.zip filter=lfs diff=lfs merge=lfs -text
-data/reference/allCountries.txt filter=lfs diff=lfs merge=lfs -text
-data/reference/admin1CodesASCII.txt filter=lfs diff=lfs merge=lfs -text
+data/reference/cities500.txt filter=lfs diff=lfs merge=lfs -text

@@ -1,0 +1,208 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Address Pipeline — Results Dashboard</title>
+  <link rel="stylesheet" href="vendor/fonts/inter.css">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <!-- ── Header ──────────────────────────────────────────────── -->
+  <header class="top-bar">
+    <div class="brand">
+      <div class="brand-logo" id="brandLogo">
+        <!-- Replace inner content with <img src="your-logo.png" alt="Logo"> -->
+        LOGO
+      </div>
+      <h1>Address Pipeline <span class="subtitle">Results Dashboard</span></h1>
+    </div>
+    <div class="file-controls">
+      <div class="theme-switcher">
+        <label for="themeSelect">Theme</label>
+        <select id="themeSelect">
+          <option value="lloyds">🟢 Lloyds Bank</option>
+          <option value="dark">🌙 Dark</option>
+        </select>
+      </div>
+      <label class="upload-btn" id="uploadLabel">
+        <input type="file" id="fileInput" accept=".csv,.xlsx,.xls" hidden>
+        <span class="icon">📂</span> Upload CSV / Excel
+      </label>
+      <span class="filename" id="fileName">No file loaded</span>
+    </div>
+  </header>
+
+  <!-- ── KPI Cards ───────────────────────────────────────────── -->
+  <section class="kpi-strip" id="kpiStrip">
+    <div class="kpi-card">
+      <div class="kpi-value" id="kpiTotal">—</div>
+      <div class="kpi-label">Total Rows</div>
+    </div>
+    <div class="kpi-card kpi-validated">
+      <div class="kpi-value" id="kpiValidated">—</div>
+      <div class="kpi-label">Validated</div>
+      <div class="kpi-pct" id="kpiValidatedPct"></div>
+    </div>
+    <div class="kpi-card kpi-review">
+      <div class="kpi-value" id="kpiReview">—</div>
+      <div class="kpi-label">Needs Review</div>
+      <div class="kpi-pct" id="kpiReviewPct"></div>
+    </div>
+    <div class="kpi-card kpi-rejected">
+      <div class="kpi-value" id="kpiRejected">—</div>
+      <div class="kpi-label">Rejected</div>
+      <div class="kpi-pct" id="kpiRejectedPct"></div>
+    </div>
+    <div class="kpi-card kpi-deterministic">
+      <div class="kpi-value" id="kpiDeterministic">—</div>
+      <div class="kpi-label">Deterministic</div>
+      <div class="kpi-pct" id="kpiDeterministicPct"></div>
+    </div>
+    <div class="kpi-card kpi-llm">
+      <div class="kpi-value" id="kpiLLM">—</div>
+      <div class="kpi-label">LLM Assisted</div>
+      <div class="kpi-pct" id="kpiLLMPct"></div>
+    </div>
+    <div class="kpi-card">
+      <div class="kpi-value" id="kpiTokens">—</div>
+      <div class="kpi-label">Total Tokens</div>
+    </div>
+  </section>
+
+  <!-- ── Charts Row ──────────────────────────────────────────── -->
+  <section class="charts-row">
+    <div class="chart-card">
+      <h3>Status Distribution</h3>
+      <canvas id="chartStatus"></canvas>
+    </div>
+    <div class="chart-card">
+      <h3>Parser Source</h3>
+      <canvas id="chartParser"></canvas>
+    </div>
+    <div class="chart-card">
+      <h3>Confidence Distribution</h3>
+      <canvas id="chartConfidence"></canvas>
+    </div>
+    <div class="chart-card">
+      <h3>Top 10 Countries</h3>
+      <canvas id="chartCountry"></canvas>
+    </div>
+  </section>
+
+  <!-- ── Filters / Slicers ───────────────────────────────────── -->
+  <section class="filters-bar" id="filtersBar">
+    <h3>🔍 Filters</h3>
+    <div class="filter-grid">
+      <div class="filter-group">
+        <label>Status</label>
+        <select id="filterStatus" multiple>
+          <option value="validated" selected>✅ Validated</option>
+          <option value="needs_review" selected>⚠️ Needs Review</option>
+          <option value="rejected" selected>❌ Rejected</option>
+        </select>
+      </div>
+      <div class="filter-group">
+        <label>Parser Source</label>
+        <select id="filterParser" multiple>
+          <option value="libpostal" selected>libpostal</option>
+          <option value="geonames_scan" selected>geonames_scan</option>
+          <option value="llm" selected>llm</option>
+        </select>
+      </div>
+      <div class="filter-group">
+        <label>Country Code</label>
+        <select id="filterCountry" multiple></select>
+      </div>
+      <div class="filter-group">
+        <label>GeoNames Match</label>
+        <select id="filterGeoMatch">
+          <option value="">All</option>
+          <option value="True">✅ Matched</option>
+          <option value="False">❌ No Match</option>
+        </select>
+      </div>
+      <div class="filter-group">
+        <label>Mismatch Detected</label>
+        <select id="filterMismatch">
+          <option value="">All</option>
+          <option value="True">⚠️ Yes</option>
+          <option value="False">No</option>
+        </select>
+      </div>
+      <div class="filter-group">
+        <label>Has Warnings</label>
+        <select id="filterWarnings">
+          <option value="">All</option>
+          <option value="yes">⚠️ Has Warnings</option>
+          <option value="no">Clean</option>
+        </select>
+      </div>
+      <div class="filter-group">
+        <label>Confidence ≥</label>
+        <input type="range" id="filterConfMin" min="0" max="100" value="0" step="5">
+        <span class="range-val" id="filterConfMinVal">0.00</span>
+      </div>
+      <div class="filter-group">
+        <label>Search (address / town)</label>
+        <input type="text" id="filterSearch" placeholder="Type to search…">
+      </div>
+    </div>
+    <div class="filter-actions">
+      <button id="btnApply" class="btn-primary">Apply Filters</button>
+      <button id="btnReset" class="btn-secondary">Reset All</button>
+      <span class="filter-count" id="filterCount"></span>
+    </div>
+  </section>
+
+  <!-- ── Data Table ──────────────────────────────────────────── -->
+  <section class="table-section">
+    <div class="table-header">
+      <h3>📋 Records <span id="tableCount"></span></h3>
+      <div class="table-controls">
+        <label>Rows per page:
+          <select id="pageSize">
+            <option value="20" selected>20</option>
+            <option value="50">50</option>
+            <option value="100">100</option>
+            <option value="500">500</option>
+          </select>
+        </label>
+        <button id="btnExport" class="btn-secondary">⬇ Export Filtered CSV</button>
+      </div>
+    </div>
+    <div class="table-wrap">
+      <table id="dataTable">
+        <thead><tr id="tableHead"></tr></thead>
+        <tbody id="tableBody"></tbody>
+      </table>
+    </div>
+    <div class="pagination" id="pagination"></div>
+  </section>
+
+  <!-- ── Row Detail Modal ────────────────────────────────────── -->
+  <div class="modal-overlay" id="modalOverlay">
+    <div class="modal">
+      <div class="modal-header">
+        <h3>Row Detail</h3>
+        <button class="modal-close" id="modalClose">✕</button>
+      </div>
+      <div class="modal-body" id="modalBody"></div>
+    </div>
+  </div>
+
+  <!-- ── Empty state ─────────────────────────────────────────── -->
+  <section class="empty-state" id="emptyState">
+    <div class="empty-icon">📂</div>
+    <h2>Upload a pipeline output file to get started</h2>
+    <p>Supports <strong>.csv</strong> and <strong>.xlsx</strong> files from <code>src/batch_runner.py</code></p>
+    <label class="upload-btn large" for="fileInput">
+      <span class="icon">📂</span> Choose File
+    </label>
+  </section>
+
+  <script src="vendor/chart.umd.min.js"></script>
+  <script src="vendor/xlsx.full.min.js"></script>
+  <script src="dashboard.js"></script>
+</body>
+</html>

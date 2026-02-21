@@ -944,7 +944,7 @@ with beam.Pipeline(options=pipeline_options) as p:
 
 ### 9.5 Local Batch Mode: `batch_runner.py`
 
-For local development and testing, `batch_runner.py` reads an Excel/CSV file from `data/inputs/`, loops over each row, runs the ADK pipeline, and writes results back. 
+For local development and testing, `batch_runner.py` reads an Excel/CSV file from `data/inputs/`, runs a **two-pass hybrid architecture** (§9.5.5) that resolves deterministic rows as pure Python calls and only creates ADK sessions for the ~43% of rows that need LLM, then writes results back. 
 
 #### 9.5.1 File I/O Services
 
@@ -1103,100 +1103,114 @@ def write_output(
     return filepath
 ```
 
-#### 9.5.2 Batch Runner
+#### 9.5.2 Batch Runner — Two-Pass Hybrid Architecture
 
-`batch_runner.py` sits at the **repository root** and is the CLI entry point for local batch processing. It reads a file, loops over rows, runs the ADK agent pipeline per row, and writes the results.
+`src/batch_runner.py` is the CLI entry point for local batch processing. It implements a **two-pass hybrid architecture** that avoids ADK session overhead for deterministic rows while preserving full agentic LLM processing for unresolved rows.
+
+**Why two passes?** In the original single-pass design, *every* row — even the ~57% that resolve deterministically in <5 ms — went through the full ADK machinery (session creation, event streaming, state-delta computation, 4 sub-agent invocations). This added ~50–200 ms of pure framework overhead per deterministic row. At 30M rows, that's ~475 hours of waste.
+
+**Pass 1 — Deterministic (pure Python, no ADK):**
+
+Runs Steps 0–5 as direct service-function calls on every row. If resolved, immediately runs Steps 7–8 (revalidation + persist) — also as direct calls. Zero ADK overhead.
 
 ```python
-"""Local batch runner — read file → ADK agent pipeline → write results.
+def _resolve_deterministic(row: dict, row_index: int, job_id: str = "") -> dict:
+    """Run Steps 0-5 + 7 + 8 as direct service calls.
+    Returns state dict with final_result if resolved, or status='unresolved' if not.
+    """
+    state = {
+        "address_1": row.get("address_1") or "",
+        "address_2": row.get("address_2") or "",
+        "address_3": row.get("address_3") or "",
+        "country_code": (row.get("country_code") or "").strip().upper(),
+        "row_index": row_index,
+        "job_id": job_id,
+        "warnings": [],
+    }
 
-Usage:
-    python batch_runner.py --input data/samples/test_addresses.xlsx
-    python batch_runner.py --input data/samples/batch.csv --output data/output/results.xlsx
-"""
+    normalizer.preprocess(state)          # Step 0
+    libpostal_parser.parse(state)         # Step 1
+    postal_lookup.lookup(state)           # Step 2
+    geonames_exact.match(state)           # Step 3
 
-import argparse
-import asyncio
-import logging
-from pathlib import Path
+    if state.get("exact_match"):
+        state["status"] = "resolved"
+        state["parser_source"] = "libpostal"
+        geonames_revalidation.revalidate(state)  # Step 7
+        persistence.persist(state)                # Step 8
+        return state
 
-from google.adk.runners import Runner
-from google.adk.sessions import InMemorySessionService
-from google.genai import types
+    mismatch_detector.detect(state)       # Step 4
+    address_scanner.scan(state)           # Step 5
 
-from address_pipeline_agent.agent import root_agent
-from services.io_reader import read_input
-from services.io_writer import write_output
+    if state.get("scan_match"):
+        state["status"] = "resolved"
+        state["parser_source"] = "geonames_scan"
+        geonames_revalidation.revalidate(state)  # Step 7
+        persistence.persist(state)                # Step 8
+        return state
 
-logger = logging.getLogger(__name__)
+    state["status"] = "unresolved"  # → queued for Pass 2
+    return state
+```
 
+**Pass 2 — LLM only (ADK sessions):**
 
-async def process_batch(input_path: str, output_path: str) -> None:
-    """Read input file, run pipeline per row, write results."""
-    rows = read_input(input_path)
-    logger.info("Processing %d rows from %s", len(rows), input_path)
+Only unresolved rows get ADK sessions. The pre-computed state from Pass 1 is injected as session state. The `DeterministicResolverAgent` detects the pre-computed state (via `status=unresolved` + `raw_address` already populated) and skips, so the orchestrator routes directly to LLM → revalidation → persist.
 
-    session_service = InMemorySessionService()
-    runner = Runner(
-        agent=root_agent,
-        app_name="address_pipeline_agent",
-        session_service=session_service,
-    )
-
-    results: list[dict] = []
-    for row in rows:
-        session_id = f"row_{row['row_index']}"
-
+```python
+async def _process_llm_row(
+    runner: Runner,
+    session_service: InMemorySessionService,
+    row_index: int,
+    state: dict,           # ← pre-computed state from Pass 1
+    semaphore: asyncio.Semaphore,
+) -> tuple[int, dict]:
+    """Run ADK pipeline for a single unresolved row (Step 6 + 7 + 8)."""
+    async with semaphore:
+        session_id = f"row_{row_index:06d}"
         await session_service.create_session(
-            app_name="address_pipeline_agent",
-            user_id="batch",
-            session_id=session_id,
-            state=row,
+            app_name=APP_NAME, user_id=USER_ID,
+            session_id=session_id, state=state,    # inject Pass 1 state
         )
-
-        content = types.Content(
-            role="user",
-            parts=[types.Part(text=f"Process address row {row['row_index']}")],
+        trigger = types.Content(
+            role="user", parts=[types.Part(text="Process this address.")],
         )
-
         async for event in runner.run_async(
-            user_id="batch",
-            session_id=session_id,
-            new_message=content,
+            user_id=USER_ID, session_id=session_id, new_message=trigger,
         ):
-            pass  # consume events; results are in session.state
+            pass
 
-        final = await session_service.get_session(
-            app_name="address_pipeline_agent",
-            user_id="batch",
-            session_id=session_id,
+        session = await session_service.get_session(
+            app_name=APP_NAME, user_id=USER_ID, session_id=session_id,
         )
-        result = final.state.get("final_result", {})
-        results.append(result)
+        return (row_index, session.state.get("final_result", {}))
+```
 
-    write_output(results, output_path)
-    logger.info("Batch complete: %d rows → %s", len(results), output_path)
+**Orchestration in `run_batch()`:**
 
+```python
+async def run_batch(input_path, output_path, concurrency, batch_size, resume):
+    rows = read_input(input_path)
 
-def main():
-    parser = argparse.ArgumentParser(description="Local batch address processing")
-    parser.add_argument("--input", required=True, help="Input file (Excel or CSV)")
-    parser.add_argument(
-        "--output",
-        default=None,
-        help="Output file path (default: data/output/<input_stem>_results.xlsx)",
-    )
-    args = parser.parse_args()
+    # ── Pass 1: Deterministic ────────────────────────────────────
+    llm_queue = []     # (row_index, partial_state)
+    for i, row in enumerate(rows):
+        state = _resolve_deterministic(row, i + 1, job_id)
+        if state["status"] == "unresolved":
+            llm_queue.append((i + 1, state))
+        else:
+            results[i] = state["final_result"]
 
-    input_path = Path(args.input)
-    output_path = (
-        Path(args.output)
-        if args.output
-        else Path("data/output") / f"{input_path.stem}_results.xlsx"
-    )
-
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s | %(name)s | %(message)s")
-    asyncio.run(process_batch(str(input_path), str(output_path)))
+    # ── Pass 2: LLM via ADK (only unresolved rows) ──────────────
+    if llm_queue:
+        runner = Runner(agent=root_agent, ...)
+        for batch in batches(llm_queue, batch_size):
+            tasks = [_process_llm_row(runner, ..., idx, state, sem)
+                     for idx, state in batch]
+            await asyncio.gather(*tasks)
+            # write checkpoint between batches
+```
 
 
 if __name__ == "__main__":
@@ -1216,24 +1230,54 @@ python batch_runner.py --input data/samples/batch.csv --output data/output/resul
 #### 9.5.4 Data Flow Summary
 
 ```
-data/samples/test_addresses.xlsx
+data/input/test_addresses.xlsx
   │
   ▼
 services/io_reader.py  →  read_input()  →  list[dict]   ← one dict per row
   │
-  ▼  (loop per row)
-batch_runner.py  →  Runner.run_async()  →  session.state  ← agent pipeline
+  ▼  PASS 1 (pure Python, no ADK — all rows)
+  │  _resolve_deterministic() → Steps 0-5 + 7 + 8
+  │    ├─ resolved? → results[]                           ← ~57% done here
+  │    └─ unresolved? → llm_queue[]                       ← ~43% need LLM
+  │
+  ▼  PASS 2 (ADK sessions — only unresolved rows)
+  │  _process_llm_row() → Runner.run_async() → Steps 6 + 7 + 8
+  │    └─ results[]
   │
   ▼
-services/io_writer.py  →  write_output()  →  data/output/test_addresses_results.xlsx
+services/io_writer.py  →  write_output()  →  data/output/test_addresses_output.csv
 ```
 
 | Mode | File Reader | File Writer | Entry Point |
 |------|-------------|-------------|-------------|
-| **Local batch** | `services/io_reader.py` | `services/io_writer.py` | `batch_runner.py` |
+| **Local batch** | `services/io_reader.py` | `services/io_writer.py` | `src/batch_runner.py` |
 | **`adk web`** | N/A (manual chat) | N/A (on-screen) | `adk web` |
 | **`adk api_server`** | N/A (caller POSTs JSON) | N/A (JSON response) | `adk api_server` |
 | **Dataflow** | `beam.io.ReadFromText` | `beam.io.WriteToText` | `dataflow/pipeline.py` |
+
+#### 9.5.5 Two-Pass Performance Impact
+
+The two-pass architecture eliminates ADK session overhead for deterministic rows:
+
+| Metric | Single-pass (old) | Two-pass (current) |
+|--------|-------------------|--------------------|
+| Deterministic row cost | ~50–200 ms (ADK session + 4 sub-agents + events) | **~1–5 ms** (direct function calls) |
+| LLM row cost | ~10–15 s (Ollama) | ~10–15 s (unchanged) |
+| 32K rows, 57% deterministic | ~10.5 h | **~9.7 h** (saves ~30–60 min) |
+| 30M rows, 57% deterministic | ~475 h wasted on deterministic overhead | **Minutes** for deterministic pass |
+
+**Quality guarantee:** Zero compromise. Both passes call the **identical service functions** — `normalizer.preprocess()`, `geonames_exact.match()`, `geonames_revalidation.revalidate()`, `persistence.persist()`, etc. The only difference is whether those functions are called directly (Pass 1) or via ADK sub-agent wrappers (Pass 2).
+
+**DeterministicResolverAgent fast-exit:** When the ADK pipeline runs for an LLM row in Pass 2, the pre-computed state from Pass 1 is injected. The `DeterministicResolverAgent` detects this (`status=unresolved` + `raw_address` populated) and yields a single skip event — no re-computation.
+
+**When to use which mode:**
+
+| Mode | Architecture | Use Case |
+|------|-------------|----------|
+| `src/batch_runner.py` (CLI) | Two-pass hybrid | Production batch processing (32K–30M rows) |
+| `adk web` | Full ADK (single-pass) | Development, debugging, single-address testing |
+| `adk api_server` | Full ADK (single-pass) | REST API, real-time single-address queries |
+| Dataflow (future) | Two-pass per bundle | GCP production at scale |
 
 ---
 
@@ -1247,36 +1291,44 @@ services/io_writer.py  →  write_output()  →  data/output/test_addresses_resu
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
-│  Local Checkpointing Flow                                           │
+│  Local Checkpointing Flow (Two-Pass Architecture)                   │
 │                                                                     │
-│  Input: 32K rows, batch_size=200, concurrency=8                     │
+│  Input: 32K rows, batch_size=500, concurrency=8                     │
 │    │                                                                │
-│    ├─ Batch 1 (rows 1–200)                                          │
-│    │    ├─ Process 200 rows via ADK Runner (concurrent)              │
-│    │    ├─ Write rolling checkpoint:                                 │
-│    │    │    <output>.ckpt.csv (200 rows + __row_index__)            │
-│    │    └─ ✅ Batch complete                                         │
+│    ├─ PASS 1: Deterministic (pure Python, no ADK)                   │
+│    │    ├─ Loop all 32K rows through _resolve_deterministic()        │
+│    │    ├─ ~18K resolved instantly → results[]                       │
+│    │    ├─ ~14K unresolved → llm_queue[]                             │
+│    │    └─ ✅ Pass 1 complete (~30 seconds)                          │
 │    │                                                                │
-│    ├─ Batch 2 (rows 201–400)                                        │
-│    │    ├─ Process 200 rows                                          │
-│    │    ├─ Overwrite checkpoint: <output>.ckpt.csv (400 rows)        │
-│    │    └─ ✅ Batch complete                                         │
-│    │                                                                │
-│    ├─ ...                                                           │
-│    │                                                                │
-│    ├─ 💥 CRASH at row 25,042 (during batch 126)                     │
-│    │                                                                │
-│    │  Recovery:                                                     │
-│    │    python -m src.batch_runner input.csv -o output.csv --resume  │
-│    │    1. Load <output>.ckpt.csv → 25,000 rows done                │
-│    │    2. Skip batches 1–125 (all rows present in checkpoint)       │
-│    │    3. Re-process only rows 25,001–32,000                        │
-│    │    4. Write final output, delete checkpoint                     │
-│    │                                                                │
-│    └─ Batch 160 (rows 31,801–32,000)                                │
-│         ├─ Write final output: <output>.csv (32,000 rows)            │
-│         ├─ Delete checkpoint file                                    │
-│         └─ ✅ Job complete                                           │
+│    ├─ PASS 2: LLM via ADK (only ~14K unresolved rows)               │
+│    │    │                                                           │
+│    │    ├─ LLM Batch 1 (rows 1–500 of llm_queue)                    │
+│    │    │    ├─ Process 500 rows via ADK Runner (concurrent)         │
+│    │    │    ├─ Write rolling checkpoint:                            │
+│    │    │    │    <output>.ckpt.csv (18K det + 500 LLM rows)         │
+│    │    │    └─ ✅ Batch complete                                    │
+│    │    │                                                           │
+│    │    ├─ LLM Batch 2 (rows 501–1000 of llm_queue)                 │
+│    │    │    ├─ Process 500 rows                                    │
+│    │    │    ├─ Overwrite checkpoint (18K + 1000 rows)               │
+│    │    │    └─ ✅ Batch complete                                    │
+│    │    │                                                           │
+│    │    ├─ ...                                                      │
+│    │    │                                                           │
+│    │    ├─ 💥 CRASH at LLM row 10,042 (during batch 21)             │
+│    │    │                                                           │
+│    │    │  Recovery:                                                │
+│    │    │    python -m src.batch_runner input.csv --resume           │
+│    │    │    1. Load checkpoint → 18K det + 10K LLM = 28K done      │
+│    │    │    2. Pass 1 re-runs but skips checkpointed rows           │
+│    │    │    3. Pass 2 processes only remaining ~4K LLM rows         │
+│    │    │    4. Write final output, delete checkpoint                │
+│    │    │                                                           │
+│    │    └─ LLM Batch 28 (rows 13,501–14,000)                        │
+│    │         ├─ Write final output: <output>.csv (32,000 rows)       │
+│    │         ├─ Delete checkpoint file                               │
+│    │         └─ ✅ Job complete                                      │
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -1333,7 +1385,12 @@ python -m src.batch_runner data/input/addresses_32k.csv \
 | `--batch-size 500` | 500 rows per checkpoint | ~10 min between checkpoints at ~1 row/sec. Max loss: 500 rows (~8 min). |
 | `LLM_CONCURRENCY=4` | 4 parallel LLM calls | Match `OLLAMA_NUM_PARALLEL=4` on the server |
 
-Estimated runtime: ~85% deterministic (instant) + ~15% LLM (~10s each) = 32K × 0.15 × 10s / 4 parallel ≈ **2 hours**.
+Estimated runtime with two-pass architecture:
+- **Pass 1 (deterministic):** 32K rows × ~3 ms each = ~96 seconds
+- **Pass 2 (LLM):** 32K × ~43% unresolved × 10 s each / 4 parallel ≈ **9.5 hours** (local Ollama)
+- **Pass 2 (LLM):** 32K × ~43% unresolved × 0.5 s each / 8 parallel ≈ **5 minutes** (cloud Gemini Flash)
+
+> **Note:** The LLM ratio depends on data quality. The 13-row adversarial test set shows 54% LLM; real production data with well-formed addresses typically shows 15–30% LLM.
 
 ### 10.3 Crash Scenarios & Recovery (Local)
 
@@ -1659,6 +1716,35 @@ Steps 0–5 are **plain Python functions** called within `DeterministicResolverA
 2. **2-agent design** — only orchestrator + LLM agent. Loses isolation for Step 7 (validation) and Step 8 (I/O).
 3. **SequentialAgent orchestrator** — can't do conditional LLM skip.
 4. **Tools instead of sub-agents** — tools are LLM-callable; would make the LLM decide execution order (pure-agentic, 270× cost).
+
+### ADR-002: Two-Pass Hybrid Architecture for Batch Processing
+
+**Date:** 20 February 2026
+**Status:** Implemented
+
+**Context:**
+The single-pass batch runner created an ADK session for *every* row — even the ~57% that resolve deterministically in <5 ms. Per-row ADK overhead (session creation, event streaming, state-delta computation, 4 sub-agent invocations) added ~50–200 ms per row. At scale (30M rows × 57% deterministic × 100 ms), this wastes ~475 hours of pure framework overhead. A 32K-row batch took >6.5 hours; the old non-agentic pipeline (`src/pipeline.py`) was faster because it ran deterministic steps as plain function calls and only batched unresolved rows to the LLM.
+
+**Decision:**
+Implement a two-pass hybrid architecture in `src/batch_runner.py`:
+
+- **Pass 1 — Deterministic (pure Python, no ADK):** Run Steps 0–5 + 7 + 8 as direct `services/` function calls for every row. Resolved rows go straight to output. Unresolved rows are collected into an LLM queue.
+- **Pass 2 — LLM only (ADK sessions):** Only create ADK sessions for unresolved rows. Inject the pre-computed state from Pass 1, so the `DeterministicResolverAgent` detects pre-computation (via `status=unresolved` + `raw_address` populated) and skips. The orchestrator routes directly to LLM → revalidation → persist.
+
+**Rationale:**
+- Deterministic rows cost ~1–5 ms each (direct function calls) instead of ~50–200 ms (ADK session)
+- LLM rows are unchanged — identical ADK pipeline, identical tool-calling, identical quality
+- All `services/` functions are already plain Python with no ADK dependency — the architecture was designed for this (§15 benefit #10)
+- `adk web` and `adk api_server` remain full single-pass ADK (no change)
+
+**Consequences:**
+- (+) 32K rows: Pass 1 completes in ~30 seconds (vs. ~30–60 minutes of ADK overhead previously)
+- (+) 30M rows: deterministic pass completes in minutes instead of ~475 hours of overhead
+- (+) Zero quality compromise — identical service functions, identical LLM tool-calling
+- (+) Checkpointing remains fully functional (checkpoints include both deterministic and LLM results)
+- (+) `adk web` / `adk api_server` unaffected — they still use the full ADK pipeline for single addresses
+- (–) Two code paths: deterministic steps run both as direct calls (batch) and via sub-agent (adk web). Mitigation: both call the same `services/` functions — the sub-agent is a thin wrapper.
+- (–) `DeterministicResolverAgent` needs a fast-exit check for pre-computed state. Mitigation: 5-line guard clause.
 
 ---
 

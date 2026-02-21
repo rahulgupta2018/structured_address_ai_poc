@@ -309,7 +309,11 @@ structured_address_ai_poc/
 ├── dashboard/                         # Interactive results dashboard (static HTML)
 │   ├── index.html                     # Layout & structure
 │   ├── style.css                      # Themed styles (Lloyds Bank / Dark)
-│   └── dashboard.js                   # Charts, filters, table, export logic
+│   ├── dashboard.js                   # Charts, filters, table, export logic
+│   └── vendor/                        # Bundled libs (zero CDN — works offline)
+│       ├── chart.umd.min.js           # Chart.js 4.4.1
+│       ├── xlsx.full.min.js           # SheetJS 0.18.5
+│       └── fonts/                     # Inter font (woff2 + @font-face CSS)
 │
 ├── .env.example                       # Environment variable template
 ├── requirements.txt

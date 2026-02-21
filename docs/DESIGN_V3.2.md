@@ -2009,7 +2009,11 @@ structured_address_ai/                 # Repository root
 ├── dashboard/                         # Interactive results dashboard (§19)
 │   ├── index.html                     # Layout — KPIs, charts, filters, table, modal
 │   ├── style.css                      # Themed styles (Lloyds Bank / Dark)
-│   └── dashboard.js                   # All client-side logic (~600 LOC)
+│   ├── dashboard.js                   # All client-side logic (~600 LOC)
+│   └── vendor/                        # Bundled libs (zero CDN — works offline)
+│       ├── chart.umd.min.js           # Chart.js 4.4.1
+│       ├── xlsx.full.min.js           # SheetJS 0.18.5
+│       └── fonts/                     # Inter font (woff2 + @font-face CSS)
 │
 ├── src/
 │   └── batch_runner.py                # CLI entry point: python -m src.batch_runner

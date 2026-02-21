@@ -140,6 +140,30 @@ adk web --port 8000
 pytest tests/ -v
 ```
 
+### Results Dashboard
+
+The project includes an interactive HTML dashboard for analysing pipeline output files (CSV / Excel). No build step required — just serve the `dashboard/` folder.
+
+```bash
+# Start the dashboard server
+cd dashboard && python3 -m http.server 8765
+# Opens at http://localhost:8765
+```
+
+```bash
+# Restart the server (kill existing, then re-launch)
+pkill -f "http.server 8765" 2>/dev/null; sleep 1
+cd dashboard && python3 -m http.server 8765
+```
+
+```bash
+# Stop the server
+pkill -f "http.server 8765"
+```
+
+**Features:** Upload any output CSV/Excel → 7 KPI cards, 4 interactive charts (status, parser, confidence, country), 8 filter slicers, sortable paginated data table, row detail modal, filtered CSV export.  
+**Themes:** Lloyds Bank (default, light) and Dark — switchable from the top bar, persisted in localStorage.
+
 ---
 
 ## Input Format
@@ -281,6 +305,11 @@ structured_address_ai_poc/
 ├── docs/
 │   ├── DESIGN_V3.2.md                # Full technical design document
 │   └── EXECUTIVE_SUMMARY.md          # Stakeholder-friendly overview
+│
+├── dashboard/                         # Interactive results dashboard (static HTML)
+│   ├── index.html                     # Layout & structure
+│   ├── style.css                      # Themed styles (Lloyds Bank / Dark)
+│   └── dashboard.js                   # Charts, filters, table, export logic
 │
 ├── .env.example                       # Environment variable template
 ├── requirements.txt

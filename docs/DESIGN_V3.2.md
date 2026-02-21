@@ -27,8 +27,9 @@
 16. [Risks & Mitigations](#16-risks--mitigations)
 17. [Decision Record](#17-decision-record)
 18. [Tuning Parameters & LLM Cost Reduction](#18-tuning-parameters--llm-cost-reduction)
-19. [Appendix A: ADK Documentation References](#appendix-a-adk-documentation-references)
-20. [Appendix B: Proposed File Structure](#appendix-b-proposed-file-structure)
+19. [Results Dashboard](#19-results-dashboard)
+20. [Appendix A: ADK Documentation References](#appendix-a-adk-documentation-references)
+21. [Appendix B: Proposed File Structure](#appendix-b-proposed-file-structure)
 
 ---
 
@@ -1817,6 +1818,92 @@ Recommended approach for production threshold tuning:
 
 ---
 
+## 19. Results Dashboard
+
+A client-side interactive dashboard for analysing pipeline output. It requires **no build step, no Node.js, no backend** — a static `dashboard/` folder served over HTTP.
+
+### 19.1 Architecture
+
+```
+dashboard/
+├── index.html              # Layout: header, KPI strip, charts, filters, table, modal
+├── style.css               # Themed styles (CSS custom properties)
+├── dashboard.js            # All interactive logic (vanilla JS, ~600 LOC)
+└── vendor/                 # Third-party libraries (bundled locally, zero CDN calls)
+    ├── chart.umd.min.js    # Chart.js 4.4.1 (201 KB)
+    ├── xlsx.full.min.js    # SheetJS 0.18.5 (861 KB)
+    └── fonts/
+        ├── inter.css       # @font-face declarations
+        ├── inter-latin.woff2       # Inter font — Latin subset (47 KB)
+        └── inter-latin-ext.woff2   # Inter font — Latin-ext subset (83 KB)
+```
+
+**All dependencies are bundled locally** in `vendor/` — the dashboard makes **zero external network calls** at runtime. This ensures it works behind corporate firewalls and air-gapped environments.
+
+| Library | Version | Local Path | Size |
+|---------|---------|------------|------|
+| [Chart.js](https://www.chartjs.org/) | 4.4.1 | `vendor/chart.umd.min.js` | 201 KB |
+| [SheetJS (xlsx)](https://sheetjs.com/) | 0.18.5 | `vendor/xlsx.full.min.js` | 861 KB |
+| [Inter font](https://rsms.me/inter/) | v20 | `vendor/fonts/` | 130 KB |
+
+### 19.2 Features
+
+| Category | Details |
+|----------|---------|
+| **Data source** | Dynamic file upload — accepts `.csv`, `.xlsx`, `.xls`. Parses entirely in-browser (no server round-trip). |
+| **KPI cards** (×7) | Total rows, Validated (count + %), Needs Review (count + %), Rejected (count + %), Deterministic (count + %), LLM Assisted (count + %), Total tokens |
+| **Charts** (×4) | Status distribution (doughnut), Parser source (doughnut), Confidence histogram (7 buckets, bar), Top 10 countries (horizontal bar) |
+| **Filters / Slicers** (×8) | Status (multi-select), Parser source (multi-select), Country code (multi-select, populated from data), GeoNames match, Mismatch detected, Has warnings, Confidence ≥ (range slider), Text search (address / town, debounced 300 ms) |
+| **Data table** | Sortable columns (click header → asc / desc toggle), paginated (20 / 50 / 100 / 500 rows per page), status & parser badges, inline confidence bar |
+| **Row detail modal** | Click any row → full 21-field detail view in a modal overlay (Esc / click-outside to close) |
+| **Export** | "Export Filtered CSV" button → downloads the currently filtered rows as `filtered_results.csv` |
+| **Logo placeholder** | `#brandLogo` div — replace inner content with `<img src="logo.png">` for branding |
+
+### 19.3 Theme System
+
+Two colour schemes are available, switchable via a dropdown in the top bar. Selection is persisted in `localStorage`.
+
+| Theme | Key Colours | Style |
+|-------|------------|-------|
+| **Lloyds Bank** (default) | `#002d1f` top bar, `#006a4d` accent, `#f2f4f6` background, white cards | Light / corporate |
+| **Dark** | `#0f1117` background, `#6366f1` indigo accent, `#1a1d27` cards | Dark / developer |
+
+Theme switching is implemented via `data-theme` attribute on `<html>` and CSS custom properties (`--bg`, `--accent`, `--border`, etc.). Chart.js colours are also re-rendered to match the active theme.
+
+### 19.4 Running the Dashboard
+
+```bash
+# Start (from project root)
+cd dashboard && python3 -m http.server 8765
+# → http://localhost:8765
+
+# Stop
+pkill -f "http.server 8765"
+```
+
+Then upload any output file from `data/output/` to explore the results interactively.
+
+### 19.5 Output Columns Supported
+
+The dashboard renders all 21 columns produced by `batch_runner.py`:
+
+| Column | Display | Notes |
+|--------|---------|-------|
+| `address_1` / `address_2` / `address_3` | Text (truncated in table) | Full value in modal |
+| `country_code` | Text | Used in country filter + chart |
+| `town` | Text | Searchable |
+| `street` / `building` / `postal_code` | Text | Shown in modal |
+| `status` | Colour-coded badge | `validated` (green) · `needs_review` (amber) · `rejected` (red) |
+| `confidence_score` | Inline bar + numeric | Coloured by threshold |
+| `parser_source` | Colour-coded badge | `libpostal` (blue) · `geonames_scan` (green) · `llm` (purple) |
+| `geonames_match` / `mismatch_detected` | ✅ / — | Boolean indicators |
+| `geonames_id` / `normalized_town` | Text | Shown in modal |
+| `warnings` / `review_reason` | Text | Filterable via "Has Warnings" slicer |
+| `suggested_country_code` | Text | Shown when mismatch detected |
+| `llm_calls` / `llm_prompt_tokens` / `llm_completion_tokens` | Numeric | Summed into KPI "Total Tokens" |
+
+---
+
 ## Appendix A: ADK Documentation References
 
 | Topic | URL |
@@ -1918,6 +2005,11 @@ structured_address_ai/                 # Repository root
 │   ├── DESIGN.md                      # POC design (v1.2)
 │   ├── DESIGN_V2.0.md                # Production infrastructure
 │   └── DESIGN_V3.2.md                # This document — ADK pipeline architecture
+│
+├── dashboard/                         # Interactive results dashboard (§19)
+│   ├── index.html                     # Layout — KPIs, charts, filters, table, modal
+│   ├── style.css                      # Themed styles (Lloyds Bank / Dark)
+│   └── dashboard.js                   # All client-side logic (~600 LOC)
 │
 ├── src/
 │   └── batch_runner.py                # CLI entry point: python -m src.batch_runner

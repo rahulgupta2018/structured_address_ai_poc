@@ -319,7 +319,10 @@ function chartOpts() {
 function populateCountryFilter() {
   const sel = document.getElementById('filterCountry');
   const countries = [...new Set(allRows.map(r => r.country_code).filter(Boolean))].sort();
-  sel.innerHTML = countries.map(c => `<option value="${c}" selected>${c}</option>`).join('');
+  sel.innerHTML = countries.map(c => {
+    const safe = escapeHtml(c);
+    return `<option value="${safe}" selected>${safe}</option>`;
+  }).join('');
 }
 
 function getSelectedValues(id) {
@@ -440,23 +443,27 @@ function renderCell(col, val, row) {
   if (val === undefined || val === null || val === '') return '<span style="color:#555">—</span>';
 
   if (col === 'status') {
-    return `<span class="badge badge-${val}">${val.replace('_', ' ')}</span>`;
+    const safe = escapeHtml(val);
+    const cls = sanitizeCssClass(val);
+    return `<span class="badge badge-${cls}">${safe.replace('_', ' ')}</span>`;
   }
   if (col === 'parser_source') {
-    return `<span class="badge badge-${val}">${val}</span>`;
+    const safe = escapeHtml(val);
+    const cls = sanitizeCssClass(val);
+    return `<span class="badge badge-${cls}">${safe}</span>`;
   }
   if (col === 'confidence_score') {
     const v = parseFloat(val) || 0;
     const tc = themeColors();
     const color = v >= 0.75 ? tc.validated : v >= 0.40 ? tc.needs_review : tc.rejected;
-    const w = Math.round(v * 100);
+    const w = Math.min(100, Math.max(0, Math.round(v * 100)));
     return `<span class="conf-bar">
       <span class="conf-bar-bg"><span class="conf-bar-fill" style="width:${w}%;background:${color}"></span></span>
       ${v.toFixed(2)}
     </span>`;
   }
   if (col === 'geonames_match' || col === 'mismatch_detected') {
-    return val === 'True' ? '✅' : val === 'False' ? '—' : val;
+    return val === 'True' ? '✅' : val === 'False' ? '—' : escapeHtml(val);
   }
   if (col === 'llm_calls' || col === 'llm_prompt_tokens' || col === 'llm_completion_tokens') {
     const n = parseInt(val) || 0;
@@ -533,9 +540,15 @@ function openModal(row) {
   for (const col of allCols) {
     const label = COL_LABELS[col] || col;
     let val = row[col];
-    // Render badges in modal too
-    if (col === 'status') val = `<span class="badge badge-${val}">${(val || '').replace('_', ' ')}</span>`;
-    else if (col === 'parser_source' && val) val = `<span class="badge badge-${val}">${val}</span>`;
+    // Render badges in modal too — always sanitise data-derived values
+    if (col === 'status') {
+      const cls = sanitizeCssClass(val);
+      val = `<span class="badge badge-${cls}">${escapeHtml((val || '').replace('_', ' '))}</span>`;
+    }
+    else if (col === 'parser_source' && val) {
+      const cls = sanitizeCssClass(val);
+      val = `<span class="badge badge-${cls}">${escapeHtml(val)}</span>`;
+    }
     else if (col === 'confidence_score') {
       const v = parseFloat(val) || 0;
       const tc = themeColors();
@@ -578,9 +591,12 @@ document.getElementById('btnExport').addEventListener('click', () => {
   }
   const blob = new Blob([lines.join('\n')], { type: 'text/csv' });
   const a = document.createElement('a');
-  a.href = URL.createObjectURL(blob);
+  const url = URL.createObjectURL(blob);
+  a.href = url;
   a.download = 'filtered_results.csv';
   a.click();
+  // Release blob memory after download triggers
+  setTimeout(() => URL.revokeObjectURL(url), 5000);
 });
 
 // ── Utilities ──────────────────────────────────────────────────────
@@ -597,6 +613,11 @@ function countBy(rows, key) {
 function escapeHtml(s) {
   if (!s) return '';
   return s.toString().replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+/** Strip everything except [a-zA-Z0-9_-] to prevent CSS class injection */
+function sanitizeCssClass(s) {
+  if (!s) return '';
+  return s.toString().replace(/[^a-zA-Z0-9_-]/g, '');
 }
 function debounce(fn, ms) {
   let t;

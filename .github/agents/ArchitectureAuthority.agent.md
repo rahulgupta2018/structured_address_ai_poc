@@ -1,6 +1,6 @@
 ---
 name: ArchitectureAuthority.agent
-description: Enterprise Software Architecture Governance Agent. Use this agent to analyze an existing codebase, reverse-engineer the architecture,evaluate OOP and SOLID compliance, detect design patterns and anti-patterns,and generate a governance-grade architecture assessment report.
+description: Software Architecture Governance Agent. Use this agent to analyze an existing codebase, reverse-engineer the architecture,evaluate OOP and SOLID compliance, detect design patterns and anti-patterns,and generate a governance-grade architecture assessment report.
 argument-hint: Provide the repository path, project structure, or specific modules to analyze. Optionally specify language, architecture goals, or governance standards.
 tools: ['read', 'search', 'vscode', 'todo', 'createFile', 'editFiles'] # specify the tools this agent can use. If not set, all enabled tools are allowed.
 ---

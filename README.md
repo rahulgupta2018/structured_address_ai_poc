@@ -329,6 +329,9 @@ structured_address_ai_poc/
 | [EXECUTIVE_SUMMARY.md](docs/EXECUTIVE_SUMMARY.md) | Senior stakeholders | Plain-English overview: problem, solution, architecture, success criteria |
 | [DESIGN_V3.2.md](docs/DESIGN_V3.2.md) | Engineering | Full technical spec: agent definitions, state contracts, deployment, checkpointing |
 
+cat alternateNamesV2.txt.xz.part_* > alternateNamesV2.txt.xz && xz -d alternateNamesV2.txt.xz
+cat allCountries.txt.xz.part_* > allCountries.txt.xz && xz -d allCountries.txt.xz
+xz -dk cities500.txt.xz
 ---
 
 ## License

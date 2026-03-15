@@ -94,7 +94,7 @@ OLLAMA_BASE_URL: str = _validated_ollama_url(
 )
 
 # ADK model identifiers
-LLM_MODEL_DEV: str = os.getenv("LLM_MODEL_DEV", "ollama_chat/qwen2.5-coder:14b")
+LLM_MODEL_DEV: str = os.getenv("LLM_MODEL_DEV", "ollama_chat/qwen3.5")
 LLM_MODEL_PROD: str = os.getenv("LLM_MODEL_PROD", "gemini-2.0-flash")
 LLM_MODEL: str = os.getenv("LLM_MODEL", LLM_MODEL_DEV)
 

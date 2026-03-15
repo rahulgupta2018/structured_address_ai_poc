@@ -32,6 +32,8 @@ Thumbs.db
 data/output/*.xlsx
 data/output/*.csv
 
+# Test Results
+tests/test_results/*.txt
 # Large GeoNames reference files (originals - too big for GitHub)
 data/reference/allCountries.txt
 data/reference/alternateNamesV2.txt

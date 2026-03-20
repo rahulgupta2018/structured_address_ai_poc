@@ -17,13 +17,16 @@ logger = logging.getLogger(__name__)
 
 # Canonical output column order
 _OUTPUT_COLUMNS = [
-    "address_1",
-    "address_2",
-    "address_3",
+    "input_address_1",
+    "input_address_2",
+    "input_address_3",
     "country_code",
-    "town",
-    "street",
+    "address_line_1",
+    "address_line_2",
     "building",
+    "street",
+    "town",
+    "country",
     "postal_code",
     "status",
     "confidence_score",

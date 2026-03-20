@@ -207,6 +207,22 @@ def _resolve_deterministic(row: dict, row_index: int, job_id: str = "") -> dict:
     # Step 1: libpostal parse
     libpostal_parser.parse(state)
 
+    # Country-only guard: address contains only a country name
+    if state.get("libpostal_country") and not any([
+        state.get("libpostal_town"),
+        state.get("libpostal_street"),
+        state.get("libpostal_building"),
+        state.get("libpostal_postal_code"),
+        state.get("libpostal_city_candidates"),
+    ]):
+        state["status"] = "needs_review"
+        state["parser_source"] = None
+        state["confidence"] = 0.0
+        state["warnings"].append("country_only_address")
+        logger.debug("Row %d: Country-only address — needs review", row_index)
+        persistence.persist(state)
+        return state
+
     # Step 2: Postal code lookup
     postal_lookup.lookup(state)
 
@@ -303,10 +319,12 @@ async def _process_llm_row(
 
         logger.warning("Row %d: no final_result in session state", row_index)
         return (row_index, {
-            "address_1": state["address_1"],
-            "address_2": state["address_2"],
-            "address_3": state["address_3"],
+            "input_address_1": state["address_1"],
+            "input_address_2": state["address_2"],
+            "input_address_3": state["address_3"],
             "country_code": state["country_code"],
+            "address_line_1": "",
+            "address_line_2": "",
             "status": "rejected",
             "confidence_score": 0.0,
             "warnings": "pipeline_error",
@@ -317,10 +335,12 @@ async def _process_llm_row(
 def _make_error_result(row: dict) -> dict:
     """Build a rejected result dict for a row that crashed."""
     return {
-        "address_1": row.get("address_1"),
-        "address_2": row.get("address_2"),
-        "address_3": row.get("address_3"),
+        "input_address_1": row.get("address_1"),
+        "input_address_2": row.get("address_2"),
+        "input_address_3": row.get("address_3"),
         "country_code": row.get("country_code"),
+        "address_line_1": "",
+        "address_line_2": "",
         "status": "rejected",
         "confidence_score": 0.0,
         "warnings": "pipeline_exception",

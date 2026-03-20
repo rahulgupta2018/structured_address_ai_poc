@@ -97,6 +97,11 @@ E2E_MISMATCH_SAMPLES = [
 E2E_NO_MISMATCH_SAMPLES = [
     ("Springfield, IL 62701",      "US", False, None),   # Correct CC, exact match → skip
     ("Berlin, 10115",              "DE", False, None),   # Correct CC, exact match → skip
+    (                                                     # Full Pakistan address:
+        "Plot 16-B, Punjab Small Industries Estate, "     #   Taxila found via postal fallback
+        "Jhang Bahtra Road, Taxila, Pakistan",
+        "PK", False, None,
+    ),
 ]
 
 E2E_STEP1_MISMATCH_SAMPLES = [
@@ -109,12 +114,7 @@ E2E_STEP1_MISMATCH_SAMPLES = [
 ]
 
 E2E_NO_MATCH_SAMPLES = [
-    ("Taxila, GT Road, Pakistan",  "PK", False, None),   # City not in DB, no mismatch
-    (                                                     # Full Pakistan address:
-        "Plot 16-B, Punjab Small Industries Estate, "     #   Taxila not in GeoNames DB
-        "Jhang Bahtra Road, Taxila, Pakistan",            #   "jhang" stays in street, not candidates
-        "PK", False, None,
-    ),
+    ("Taxila, GT Road, Pakistan",  "PK", False, None),   # Too short for libpostal city parse
 ]
 
 

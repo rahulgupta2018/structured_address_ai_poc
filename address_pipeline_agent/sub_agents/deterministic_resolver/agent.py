@@ -106,6 +106,26 @@ class DeterministicResolverAgent(BaseAgent):
         # Step 1: libpostal parse
         libpostal_parser.parse(state)
 
+        # Country-only guard: address contains only a country name
+        if state.get("libpostal_country") and not any([
+            state.get("libpostal_town"),
+            state.get("libpostal_street"),
+            state.get("libpostal_building"),
+            state.get("libpostal_postal_code"),
+            state.get("libpostal_city_candidates"),
+        ]):
+            state["status"] = "needs_review"
+            state["parser_source"] = None
+            state["confidence"] = 0.0
+            state["warnings"].append("country_only_address")
+            logger.info("Row %s: Country-only address — needs review", ri)
+            yield _make_event(
+                self.name,
+                "Country-only address — needs review.",
+                _compute_delta(snapshot, state),
+            )
+            return
+
         # Step 2: Postal code lookup
         postal_lookup.lookup(state)
 

@@ -30,11 +30,14 @@ SAMPLE_GEONAMES_ID = 4250542
 
 SAMPLE_RESULTS = [
     {
-        "address_1": SAMPLE_ADDRESS_1,
-        "address_2": SAMPLE_ADDRESS_2,
-        "address_3": SAMPLE_ADDRESS_3,
+        "input_address_1": SAMPLE_ADDRESS_1,
+        "input_address_2": SAMPLE_ADDRESS_2,
+        "input_address_3": SAMPLE_ADDRESS_3,
         "country_code": SAMPLE_COUNTRY_CODE,
+        "address_line_1": "123, Main St, 62701",
+        "address_line_2": "",
         "town": SAMPLE_TOWN,
+        "country": "United States",
         "street": SAMPLE_STREET,
         "building": SAMPLE_BUILDING,
         "postal_code": SAMPLE_POSTAL_CODE,

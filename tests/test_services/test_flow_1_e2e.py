@@ -87,8 +87,9 @@ FLOW_1_EDGE_SAMPLES = [
 
 # -- Expected keys in final_result dict --
 EXPECTED_FINAL_RESULT_KEYS = {
-    "address_1", "address_2", "address_3", "country_code",
-    "town", "street", "building", "postal_code",
+    "input_address_1", "input_address_2", "input_address_3", "country_code",
+    "address_line_1", "address_line_2",
+    "town", "country", "street", "building", "postal_code",
     "status", "confidence_score", "parser_source",
     "geonames_match", "geonames_id", "normalized_town",
     "warnings", "review_reason",

@@ -9,11 +9,19 @@ mocked dependencies — no database, no network, no LLM calls required.
 ## Pipeline Overview
 
 ```
-┌─────────┐   ┌─────────┐   ┌─────────┐   ┌─────────┐   ┌─────────┐   ┌─────────┐   ┌─────────┐   ┌─────────┐   ┌─────────┐
-│ Step 0  │──▶│ Step 1  │──▶│ Step 2  │──▶│ Step 3  │──▶│ Step 4  │──▶│ Step 5  │──▶│ Step 6  │──▶│ Step 7  │──▶│ Step 8  │
-│Normalize│   │ Parse   │   │ Postal  │   │ Exact   │   │Mismatch │   │  Scan   │   │  LLM    │   │Revalid. │   │ Persist │
-└─────────┘   └─────────┘   └─────────┘   └─────────┘   └─────────┘   └─────────┘   └─────────┘   └─────────┘   └─────────┘
+┌─────────┐   ┌─────────┐   ┌──────────┐   ┌─────────┐   ┌─────────┐   ┌─────────┐   ┌─────────┐   ┌─────────┐   ┌─────────┐   ┌─────────┐
+│ Step 0  │──▶│ Step 1  │──▶│ Country- │──▶│ Step 2  │──▶│ Step 3  │──▶│ Step 4  │──▶│ Step 5  │──▶│ Step 6  │──▶│ Step 7  │──▶│ Step 8  │
+│Normalize│   │ Parse   │   │ only     │   │ Postal  │   │ Exact   │   │Mismatch │   │  Scan   │   │  LLM    │   │Revalid. │   │ Persist │
+└─────────┘   └─────────┘   │ guard    │   └─────────┘   └─────────┘   └─────────┘   └─────────┘   └─────────┘   └─────────┘   └─────────┘
+                             └──────────┘
 ```
+
+**Four flows:** Flow 0 (0→1→guard→8), Flow 1 (0→1→2→3→8), Flow 2 (0→1→2→3→4→5→8), Flow 3 (0→1→2→3→4→5→6→7→8)
+
+**Key guards:**
+- **Country-only guard** (after Step 1): If address contains only a country name with no other components → `needs_review` with `country_only_address` warning, skips Steps 2–7
+- **Step 3 postal-code fallback**: Towns absent from cities500 but present in postal-codes dataset (e.g. Taxila/PK) → `match_type="postal"`, `confidence=0.95`
+- **Step 8 ASCII normalization**: `town` and `normalized_town` fields are ASCII-normalized via `to_ascii()` (e.g. Brasília→Brasilia)
 
 ---
 
@@ -131,6 +139,12 @@ then falls back to `country_code`. This multi-country resolution prevents
 false positives from wrong-CC addresses (e.g. Thai address with CC=US now
 resolves to the correct Thai city instead of an accidental US match).
 
+After the main candidate loop fails, a **postal-code fallback** tries
+libpostal-derived candidates against the GeoNames postal-codes table
+(country-filtered). This catches towns too small for cities500 (e.g.
+Taxila/PK) that exist only in the postal dataset. `match_type="postal"`,
+`confidence=0.95`. Skips `postal_town_candidate` to avoid circular matches.
+
 All tests call the **real** `match()` and `_disambiguate()` against the **real**
 SQLite database — zero mocks. Generic parameterized test classes drive multiple
 sample cities through the same assertions.
@@ -145,7 +159,7 @@ sample cities through the same assertions.
 | `TestMatchCandidateFallback` | Edge (×1) | `libpostal_town` has no match but `postal_town_candidate` does → falls back to postal candidate | `exact_match=True` via postal candidate, correct Springfield IL geonames_id |
 | `TestMatchPreservesState` | Edge (×1) | Pre-existing keys survive after `match()` | `extra_key`, `row_index`, `job_id` not removed |
 | `TestMatchWrongCountryCode` | Edge (×2) | Thai address + US country code → suggested-CC-first resolves Krabi in TH (not US false positive); London address + AU country code → resolves London in GB via suggested CC | `exact_match=True`, correct `geonames_id` in suggested country, `mismatch_detected=True`, `matched_country_code` = suggested CC |
-| `TestMatchCityNotInDB` | Negative (×2) | Taxila (real city, absent from GeoNames) — no false positive from road-name token "Jhang" | `exact_match=False`, "jhang" stays in `libpostal_street` not `libpostal_city_candidates` |
+| `TestMatchCityNotInDB` | Negative (×2) | Taxila (real city, absent from GeoNames cities500) — postal fallback resolves when libpostal provides city candidate; short address form where libpostal cannot extract city → no match | Postal fallback: `exact_match=True`, `match_type="postal"`, `confidence=0.95`; short form: `exact_match=False`, "jhang" stays in `libpostal_street` not `libpostal_city_candidates` |
 | `TestMatchFromRawAddress` | E2E (×5 samples) | Parameterized: raw address → `parse()` → `lookup()` → `match()` full pipeline flow | Italy/Thailand/US addresses with postal codes resolve; Pakistan/Japan addresses without postal codes get no match |
 
 **61 tests** (29 happy-path parameterized + 7 negative + 5 edge-case +
@@ -184,10 +198,10 @@ the same assertions.
 | `TestDetectCandidateFallback` | Edge (×2 samples) | Parameterized: libpostal_town=None, town_candidate provides the name instead | Falls back to `town_candidate`, detects mismatch correctly |
 | `TestDetectWhitespace` | Edge (×1) | Town name with leading/trailing spaces | Whitespace stripped by `list_countries_for_city`; correct mismatch detected |
 | `TestDetectPreservesState` | Edge (×1) | Pre-existing keys survive after `detect()` | `extra_key`, `row_index` etc. not removed |
-| `TestDetectFromRawAddress` | E2E (×7 samples) | Parameterized: raw address → `parse()` → `lookup()` → `match()` → `detect()` full pipeline flow | Mismatch for wrong-country addresses (Ko Lanta+US, Bari Sardo+IE, Mumbai+US); no mismatch for correct-country (Springfield+US, Berlin+DE); Step 1 mismatch preserved (Tokyo+JP/US); no match at all (Taxila+PK) |
+| `TestDetectFromRawAddress` | E2E (×8 samples) | Parameterized: raw address → `parse()` → `lookup()` → `match()` → `detect()` full pipeline flow | Mismatch for wrong-country addresses (Ko Lanta+US, Bari Sardo+IE, Mumbai+US); no mismatch for correct-country (Springfield+US, Berlin+DE, Plot 16-B Taxila+PK via postal fallback); Step 1 mismatch preserved (Tokyo+JP/US); no match at all (short Taxila+PK address) |
 
-**31 tests** (11 happy-path parameterized + 4 negative + 9 edge-case +
-7 end-to-end parameterized), all hitting the real GeoNames SQLite database
+**33 tests** (11 happy-path parameterized + 4 negative + 9 edge-case +
+8 end-to-end parameterized), all hitting the real GeoNames SQLite database
 and real libpostal parser — zero mocks.
 
 ---
@@ -364,12 +378,14 @@ deterministic paths resolve against GeoNames directly and need no LLM re-validat
 
 The last pipeline step: assembles the final output dict from the accumulated
 state, maps internal statuses to output statuses, rounds confidence, joins
-warnings, and computes review reasons.
+warnings, and computes review reasons. ASCII-normalizes `town` and
+`normalized_town` fields via `to_ascii()` (e.g. Brasília→Brasilia,
+Medellín→Medellin, Jonquières→Jonquieres).
 
 | Test class | What it checks |
 |---|---|
-| `TestPersist` | Validated/resolved/needs_review/rejected status mapping, LLM-usage zeros, warning joining, geonames_match flag, mismatch info, confidence rounding |
-| `TestComputeReviewReason` | Validated → None, no address data, LLM result present, no LLM result, other status |
+| `TestPersist` | Validated/resolved/needs_review/rejected status mapping, LLM-usage zeros, warning joining, geonames_match flag, mismatch info, confidence rounding, ASCII normalization of town fields |
+| `TestComputeReviewReason` | Validated → None, no address data, LLM result present, no LLM result, country_only_address warning → "country_only_address", other status |
 
 ---
 
@@ -393,11 +409,11 @@ use the real GeoNames SQLite database — zero mocks.
 
 1. **Primary exact match** — libpostal extracts town, postal code assists lookup, Step 3 finds a primary-name match → `validated`, `confidence = 1.0`, `geonames_match = True`, `parser_source = "libpostal"`.
 2. **Postal-assisted disambiguation** — ambiguous city name (e.g. Springfield), postal code provides admin1 signal → correct geonames_id selected.
-3. **Multi-field address** — address spread across `address_1`, `address_2`, `address_3` → all original fields preserved in `final_result`.
+3. **Multi-field address** — address spread across `input_address_1`, `input_address_2`, `input_address_3` → all original fields preserved in `final_result`.
 
 #### Negative Scenarios
 
-1. **City not in GeoNames** — real city absent from the GeoNames cities1000 table (e.g. Taxila, PK) → `rejected`, `confidence_score = 0.0`, `geonames_match = False`.
+1. **City not in GeoNames** — real city absent from the GeoNames cities1000 table and postal-codes table, or address too short for libpostal to extract a city candidate → `rejected`, `confidence_score = 0.0`, `geonames_match = False`.
 2. **Unparseable address** — gibberish or unconventional format → no match at Step 3, `rejected`.
 3. **Empty address fields** — all three address fields blank → `rejected`, `review_reason = "no_address_data"`.
 
@@ -406,6 +422,7 @@ use the real GeoNames SQLite database — zero mocks.
 1. **Alternate-name match** — Step 3 matches via an alternate spelling → `validated` with `confidence = 0.95` (not 1.0).
 2. **Mismatch CC resolved via suggested country** — address says Thailand but CC=US → Step 3 tries suggested CC (TH) first, resolves Krabi correctly → `validated`, `confidence = 1.0`, `mismatch_detected = True`.
 3. **London with wrong CC resolved via suggested country** — London address with CC=AU → Step 3 tries suggested CC (GB) first, resolves London correctly → `validated`, `confidence = 1.0`, `mismatch_detected = True`.
+4. **Postal-code fallback for small towns** — City absent from cities500 but present in postal-codes (e.g. Taxila/PK with postcodes 47050/47070/47080) → Step 3's postal-code fallback resolves it → `validated`, `confidence = 0.95`, `match_type = "postal"`.
 
 ---
 
@@ -433,7 +450,7 @@ All tests use the real GeoNames SQLite database — zero mocks.
 #### Negative Scenarios
 
 1. **City not in any table** — completely unrecognisable location → `rejected`, `confidence_score = 0.0`.
-2. **City absent from GeoNames** — real city not in cities1000 (e.g. Taxila, PK) → neither Step 3 nor scanner matches, `rejected`.
+2. **City absent from GeoNames** — real city not in cities1000 or postal-codes (e.g. very small villages) → neither Step 3 nor scanner matches, `rejected`.
 3. **Empty address fields** — blank input → `rejected`, `review_reason = "no_address_data"`.
 
 Note: Many previously-unresolved wrong-CC scenarios (e.g. London+AU) now resolve

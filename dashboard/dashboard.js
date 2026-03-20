@@ -56,8 +56,9 @@ function themeColors() {
 initTheme();
 
 const DISPLAY_COLS = [
-  'address_1', 'address_2', 'address_3', 'country_code',
-  'town', 'status', 'confidence_score', 'parser_source',
+  'input_address_1', 'input_address_2', 'input_address_3', 'country_code',
+  'address_line_1', 'address_line_2',
+  'town', 'country', 'status', 'confidence_score', 'parser_source',
   'geonames_match', 'geonames_id',
   'warnings', 'review_reason',
   'mismatch_detected', 'suggested_country_code',
@@ -65,8 +66,9 @@ const DISPLAY_COLS = [
 ];
 
 const COL_LABELS = {
-  address_1: 'Address 1', address_2: 'Address 2', address_3: 'Address 3',
-  country_code: 'CC', town: 'Town', status: 'Status',
+  input_address_1: 'Input Addr 1', input_address_2: 'Input Addr 2', input_address_3: 'Input Addr 3',
+  country_code: 'CC', address_line_1: 'Address Line 1', address_line_2: 'Address Line 2',
+  town: 'Town', country: 'Country', status: 'Status',
   confidence_score: 'Confidence', parser_source: 'Parser',
   geonames_match: 'Geo Match', geonames_id: 'Geo ID',
   warnings: 'Warnings', review_reason: 'Review Reason',
@@ -349,7 +351,7 @@ function applyFilters() {
     if (warnings === 'no' && r.warnings) return false;
     if (confMin > 0 && (parseFloat(r.confidence_score) || 0) < confMin) return false;
     if (search) {
-      const hay = [r.address_1, r.address_2, r.address_3, r.town, r.country_code, r.warnings, r.review_reason]
+      const hay = [r.input_address_1, r.input_address_2, r.input_address_3, r.town, r.country_code, r.warnings, r.review_reason]
         .join(' ').toLowerCase();
       if (!hay.includes(search)) return false;
     }

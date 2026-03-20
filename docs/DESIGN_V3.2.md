@@ -1,6 +1,6 @@
 # Structured Address AI v3 — ADK Agentic Pipeline Architecture
 
-> **Version:** 3.2 — _18 March 2026_
+> **Version:** 3.2 — _20 March 2026_
 > **Status:** Proposed — Refactors v2 pipeline as a Google ADK agent workflow
 > **Prerequisite:** [DESIGN_V2.md](./DESIGN_V2.md) — production infrastructure, data architecture, security, cost model
 > **Audience:** Engineering, Architecture Review
@@ -204,10 +204,11 @@ Input → Orchestrator
          └─→ PersistAgent (Step 8) — always runs
 ```
 
-**Three pipeline flows:**
+**Four pipeline flows:**
 
 | Flow | Path | Trigger |
 |------|------|---------|
+| Flow 0 | Steps 0→1→8 | Country-only address — guard short-circuits to `needs_review` |
 | Flow 1 | Steps 0→1→2→3→8 | Step 3 resolves with exact match (confidence ≥ 0.95) |
 | Flow 2 | Steps 0→1→2→3→4→5→8 | Step 5 resolves via scanner (confidence 0.80) |
 | Flow 3 | Steps 0→1→2→3→4→5→6→7→8 | LLM fallback — Step 7 prevents hallucination |
@@ -237,6 +238,14 @@ decision points after Step 3 and Step 5.
 │  (libpostal│  │ + country detect │──→ mismatch_detected?, suggested_cc?                                                 │
 │            │  └────────┬─────────┘                                                                                      │
 │            │           │                                                                                                │
+│            │           ▼                                                                                                │
+│  Country-  │     ◆ country_only?                                                                                        │
+│  only      │    ╱ ╲                                                                                                     │
+│  guard     │  ╱  YES ╲──→ status="needs_review", conf=0.0 ─────────────────────────────────┐               │
+│            │  ╲      ╱    warning="country_only_address"                                     │               │
+│            │    ╲  ╱                                                                         │               │
+│            │  NO  ◆                                                                          │               │
+│            │      │                                                                          │               │
 ├────────────┼───────────┼────────────────────────────────────────────────────────────────────────────────────────────────┤
 │            │           ▼                                                                                                │
 │  Step 2    │  ┌──────────────────┐                                                                                      │
@@ -305,7 +314,8 @@ decision points after Step 3 and Step 5.
 │            │                                      ╚════════════╝                                                         │
 │            │                                                                                                            │
 ├────────────┼────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
-│  FLOWS     │  Flow 1: ■■■ Step 0 → 1 → 2 → 3 ═══════════════════════════════════════════════════════════► 8             │
+│  FLOWS     │  Flow 0: ■■■ Step 0 → 1 → (country-only guard) ══════════════════════════════════════════════► 8             │
+│            │  Flow 1: ■■■ Step 0 → 1 → 2 → 3 ═══════════════════════════════════════════════════════════► 8             │
 │            │  Flow 2: ■■■ Step 0 → 1 → 2 → 3 → 4 → 5 ══════════════════════════════════════════════════► 8             │
 │            │  Flow 3: ■■■ Step 0 → 1 → 2 → 3 → 4 → 5 → 6 → 7 ═════════════════════════════════════════► 8             │
 └────────────┴────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
@@ -315,6 +325,7 @@ decision points after Step 3 and Step 5.
 - Each horizontal band is a pipeline step (service).
 - Vertical flow moves top-to-bottom through the steps.
 - Diamond (◆) nodes are decision points where flows diverge.
+- **Flow 0** exits at the country-only guard after Step 1 → jumps directly to Step 8.
 - **Flow 1** exits at Step 3's YES branch → jumps directly to Step 8.
 - **Flow 2** exits at Step 5's YES branch → jumps directly to Step 8.
 - **Flow 3** falls through all NO branches → Steps 6, 7, then 8.
@@ -349,6 +360,10 @@ User Input (address row via adk web / adk api_server / adk run)
 │  │  Step 1: libpostal_parse(state)                                  │  │
 │  │    → town_candidate, street, building, postal_code               │  │
 │  │                                                                  │  │
+│  │  Country-only guard:                                             │  │
+│  │    → if only country detected (no town/street/postal/building)   │  │
+│  │    → status="needs_review", skip to Step 8                       │  │
+│  │                                                                  │  │
 │  │  Step 2: postal_code_lookup(state)  (3-tier fallback)            │  │
 │  │    → Tier 1: postal+country  │  Tier 2: postal+suggested_cc   │  │
 │  │    → Tier 3: postal-only (disambiguated or single-country)      │  │
@@ -356,6 +371,7 @@ User Input (address row via adk web / adk api_server / adk run)
 │  │                                                                  │  │
 │  │  Step 3: exact_match(state)                                      │  │
 │  │    → if confident match: status="validated" → DONE               │  │
+│  │    → postal-code fallback for small towns (match_type="postal")  │  │
 │  │    → if no match: continue                                       │  │
 │  │                                                                  │  │
 │  │  Step 4: mismatch_detect(state)     ← only if not yet resolved   │  │
@@ -437,6 +453,14 @@ CSV Batch (from GCS) or API Request
   │     └─ Mismatch detection: if libpostal-detected country ≠ input
   │           country_code → flags mismatch + suggests correct CC
   │
+  ├─ Country-only guard (after Step 1)
+  │     ├─ If libpostal_country is set AND no other components exist
+  │     │   (no town, street, building, postal_code, city_candidates)
+  │     ├─ → status="needs_review", confidence=0.0,
+  │     │   warning="country_only_address", parser_source=None
+  │     └─ Short-circuits to Step 8 (persist) — skips Steps 2–7 and LLM
+  │        Prevents LLM hallucination for country-only addresses
+  │
   ├─ Step 2: lookup(state)        ─── services/postal_lookup.py
   │     ├─ Reads:  libpostal_postal_code, country_code,
   │     │          suggested_country_code (optional, from Step 1)
@@ -475,11 +499,18 @@ CSV Batch (from GCS) or API Request
   │     │        a. Postal admin1 code match
   │     │        b. Postal region match
   │     │        c. Population fallback (largest city)
+  │     ├─ Postal-code fallback (when all candidates fail):
+  │     │     Towns too small for cities500 (e.g. Taxila/PK) may exist
+  │     │     only in the GeoNames postal-codes dataset. After the main
+  │     │     candidate loop fails, tries libpostal-derived candidates
+  │     │     against the postal-codes table (country-filtered).
+  │     │     Skips postal_town_candidate to avoid circular matches.
+  │     │     match_type="postal", confidence=0.95.
   │     ├─ Writes: exact_match          (bool)
   │     │          geonames_id           (int or None)
   │     │          town_candidate        (resolved city name)
-  │     │          match_type            ("primary" or "alternate")
-  │     │          match_confidence      (1.0 for primary, 0.95 for alternate)
+  │     │          match_type            ("primary", "alternate", or "postal")
+  │     │          match_confidence      (1.0 for primary, 0.95 for alternate/postal)
   │     │          matched_country_code  (if resolved in suggested CC)
   │     ├─ match → ✅ status="validated" (source=libpostal), DONE
   │     └─ no match → continue to Step 4
@@ -536,6 +567,9 @@ CSV Batch (from GCS) or API Request
   │
   └─ Step 8: persist(state)       ─── PersistAgent
         ├─ ALWAYS runs (on all paths)
+        ├─ ASCII-normalizes town and normalized_town fields
+        │   (e.g. Brasília→Brasilia, Medellín→Medellin) via to_ascii()
+        ├─ Computes review_reason (includes "country_only_address")
         ├─ Write to Cloud SQL (audit trail)
         ├─ Write results CSV to GCS output bucket
         ├─ Write needs_review rows to separate CSV
@@ -553,6 +587,9 @@ Based on comprehensive testing of Steps 0–3 with real database and real libpos
 | **Step 1 mismatch detection is critical** | When address text says "Thailand" but CC=US, Step 1 flags `mismatch_detected=True` and `suggested_country_code=TH`. This enables Step 2 Tier 2 fallback. | Without mismatch detection, Tier 2 cannot fire — wrong-CC addresses get no postal signal |
 | **Suggested-CC-first prevents false positives** | Thai address "Long Beach Pra-Ae Beach" + wrong CC=US — previously "long" matched a US city. Now Steps 3 & 5 try `suggested_country_code` first when `mismatch_detected`, resolving Krabi in TH deterministically. | Multi-country fallback in Steps 3 & 5 eliminates wrong-CC false positives. Step 7 only runs on LLM path to prevent hallucination |
 | **62701 is US-only** | Unique postal code — Tier 3 postal-only resolves it even without country | Demonstrates the value of single-country postal codes for recovery |
+| **Postal-code fallback resolves small towns** | Towns too small for cities500 (e.g. Taxila/PK, pop. ~70K) are absent from the city-names table but present in the postal-codes dataset (postcodes 47050, 47070, 47080). Step 3's postal-code fallback catches these after the main candidate loop fails. | Increases deterministic resolution rate; fewer rows fall through to the LLM |
+| **Country-only addresses cause LLM hallucination** | Address with only a country name (e.g. "Italy,,,IT") → libpostal parses `country=italy` with no city/street/postal components. Without a guard, the LLM hallucinates a random town (e.g. "Louisa" — a US city). | Country-only guard after Step 1 short-circuits to `needs_review` before Steps 2–7, preventing hallucination |
+| **Diacritic/special chars in output** | GeoNames stores city names with diacritics (Brasília, Medellín, Jonquières). Output consumers expect ASCII. | Step 8 (persist) applies `to_ascii()` to `town` and `normalized_town` fields |
 
 ### State Flow Across Steps (Implemented)
 
@@ -622,6 +659,25 @@ class DeterministicResolverAgent(BaseAgent):
         # ── Step 1: libpostal Parse ─────────────────────────────
         # Extract town_candidate, street, building, postal_code, state
         libpostal_parse(state)
+
+        # ── Country-only guard ──────────────────────────────────
+        # If address contains ONLY a country name (no town, street,
+        # building, postal code, or city candidates), short-circuit
+        # to needs_review. Prevents LLM from hallucinating towns
+        # for country-only addresses (e.g. "Italy,,,IT").
+        if state.get("libpostal_country") and not any([
+            state.get("libpostal_town"),
+            state.get("libpostal_street"),
+            state.get("libpostal_building"),
+            state.get("libpostal_postal_code"),
+            state.get("libpostal_city_candidates"),
+        ]):
+            state["status"] = "needs_review"
+            state["parser_source"] = None
+            state["confidence"] = 0.0
+            state.setdefault("warnings", []).append("country_only_address")
+            yield Event(author=self.name, content=None)
+            return
 
         # ── Step 2: Postal Code Cross-Reference ─────────────────
         # Postal code → region + city hint (disambiguation signal)
@@ -853,6 +909,8 @@ class PersistAgent(BaseAgent):
 
     Runs on EVERY path. Builds the final result record from session state,
     writes to Cloud SQL and GCS, and enqueues rows with status='needs_review'.
+    ASCII-normalizes town and normalized_town fields (e.g. Brasília→Brasilia).
+    Computes review_reason (including 'country_only_address' for country-only rows).
     """
 
     model_config = {"arbitrary_types_allowed": True}
@@ -1077,7 +1135,7 @@ All agents share a single `ctx.session.state` dictionary. Here is the complete c
 | `exact_match` | 3 | `bool` | Whether exact city match was found |
 | `geonames_id` | 3, 5 | `int \| None` | GeoNames ID of matched city |
 | `town_candidate` | 3 | `str \| None` | Resolved city name from exact match |
-| `match_type` | 3, 5 | `str \| None` | `"primary"`, `"alternate"`, `"exact_ngram"`, `"fuzzy_scan"` |
+| `match_type` | 3, 5 | `str \| None` | `"primary"`, `"alternate"`, `"postal"`, `"exact_ngram"`, `"fuzzy_scan"` |
 | `match_confidence` | 3, 5 | `float` | Confidence score (1.0 primary, 0.95 alternate, varies for scan) |
 | `scan_match` | 5 | `bool` | Whether fuzzy scan found a match |
 | `scan_candidate` | 5 | `str \| None` | City name from fuzzy scan |
@@ -1345,13 +1403,15 @@ logger = logging.getLogger(__name__)
 
 _OUTPUT_COLUMNS = [
     # Original input (audit trail)
-    "address_1", "address_2", "address_3", "country_code",
-    # Extracted fields
-    "town", "street", "building", "postal_code",
+    "input_address_1", "input_address_2", "input_address_3", "country_code",
+    # Regulatory / extracted fields
+    "address_line_1", "address_line_2",
+    "building", "street", "town", "country", "postal_code",
     # Pipeline metadata
     "status", "confidence_score", "parser_source",
     "geonames_match", "geonames_id", "normalized_town",
     "warnings", "review_reason",
+    "mismatch_detected", "suggested_country_code",
 ]
 
 
@@ -1424,6 +1484,22 @@ def _resolve_deterministic(row: dict, row_index: int, job_id: str = "") -> dict:
 
     normalizer.preprocess(state)          # Step 0
     libpostal_parser.parse(state)         # Step 1
+
+    # Country-only guard: short-circuit if only country detected
+    if state.get("libpostal_country") and not any([
+        state.get("libpostal_town"),
+        state.get("libpostal_street"),
+        state.get("libpostal_building"),
+        state.get("libpostal_postal_code"),
+        state.get("libpostal_city_candidates"),
+    ]):
+        state["status"] = "needs_review"
+        state["parser_source"] = None
+        state["confidence"] = 0.0
+        state.setdefault("warnings", []).append("country_only_address")
+        persistence.persist(state)
+        return state
+
     postal_lookup.lookup(state)           # Step 2
     geonames_exact.match(state)           # Step 3
 
@@ -2182,10 +2258,11 @@ The dashboard renders all 21 columns produced by `batch_runner.py`:
 
 | Column | Display | Notes |
 |--------|---------|-------|
-| `address_1` / `address_2` / `address_3` | Text (truncated in table) | Full value in modal |
+| `input_address_1` / `input_address_2` / `input_address_3` | Text (truncated in table) | Full value in modal |
 | `country_code` | Text | Used in country filter + chart |
-| `town` | Text | Searchable |
-| `street` / `building` / `postal_code` | Text | Shown in modal |
+| `address_line_1` / `address_line_2` | Text | Regulatory 70-char address lines |
+| `building` / `street` | Text | Parsed components |
+| `town` / `country` / `postal_code` | Text | Searchable |
 | `status` | Colour-coded badge | `validated` (green) · `needs_review` (amber) · `rejected` (red) |
 | `confidence_score` | Inline bar + numeric | Coloured by threshold |
 | `parser_source` | Colour-coded badge | `libpostal` (blue) · `geonames_scan` (green) · `llm` (purple) |

@@ -99,6 +99,16 @@ CFLAGS="-I/opt/homebrew/include" LDFLAGS="-L/opt/homebrew/lib" pip install posta
 
 # Pull the LLM model (needed only if rows reach Step 6)
 ollama pull qwen2.5-coder:14b
+
+# Run Ollama, with parallel support
+
+launchctl setenv OLLAMA_NUM_PARALLEL 4 # when ollama desktop is installed. 
+
+OLLAMA_NUM_PARALLEL=4 ollama serve
+
+launchctl setenv OLLAMA_CONTEXT_LENGTH 32768 # optional — increase context length for better performance on long addresses (requires Ollama Desktop)
+launchctl setenv OLLAMA_FLASH_ATTENTION true # optional — enable Flash Attention for faster inference (requires Ollama Desktop)
+launchctl setenv OLLAMA_NUM_PARALLEL 2 # optional — set number of parallel requests Ollama can handle (should match `LLM_CONCURRENCY` in config.py)
 ```
 
 ### Run the Pipeline
@@ -138,6 +148,14 @@ adk web --port 8000
 
 ```bash
 pytest tests/ -v
+
+# Run individual test file and save output with timestamp
+TIMESTAMP=$(date +"%Y%m%d_%H%M%S") && \
+  .venv/bin/python -m pytest tests/test_services/test_geonames_revalidation.py -v -s 2>&1 \
+  | tee tests/test_results/test_geonames_revalidation_${TIMESTAMP}.txt
+
+# To run a specific test class or method, use the `::` syntax:
+.venv/bin/python -m pytest tests/test_services/test_geonames_revalidation.py::TestFlowSteps0_6_7 -v -s 2>&1 | tail -30
 ```
 
 ### Results Dashboard

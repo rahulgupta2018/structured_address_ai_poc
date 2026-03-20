@@ -6,10 +6,18 @@ When multiple cities share the same name (e.g. Springfield), uses
 disambiguation signals from the postal code lookup (admin1_code,
 region name) to select the correct one.
 
+When Step 1 detects a country mismatch (``mismatch_detected``), this
+step tries the ``suggested_country_code`` FIRST, then falls back to the
+original ``country_code``.  This avoids false positives (e.g. "Long" in
+US when the address is actually in Thailand) and lets the pipeline
+resolve the correct city deterministically.
+
 Operates on session state dict:
-  Reads:  state["libpostal_town"], state["postal_town_candidate"],
+  Reads:  state["libpostal_town"], state["libpostal_city_candidates"],
+          state["postal_town_candidate"],
           state["postal_admin1_code"], state["postal_region"],
-          state["country_code"]
+          state["country_code"],
+          state["mismatch_detected"], state["suggested_country_code"]
   Writes: state["exact_match"], state["geonames_id"],
           state["town_candidate"], state["match_type"],
           state["match_confidence"]
@@ -19,7 +27,11 @@ from __future__ import annotations
 
 import logging
 
-from services.geonames_repo import resolve_all_cities_by_name, resolve_city_by_name
+from services.geonames_repo import (
+    resolve_all_cities_by_name,
+    resolve_city_by_name,
+    search_postal_by_place_name_cc,
+)
 from services.normalizer import normalize_for_matching
 from utils.config import CONFIDENCE_EXACT_ALTERNATE, CONFIDENCE_EXACT_PRIMARY
 
@@ -78,8 +90,14 @@ def match(state: dict) -> dict:
     """Step 3: try exact GeoNames match on libpostal and postal candidates.
 
     Tries candidates in order:
-        1. libpostal_town
-        2. postal_town_candidate
+        1. libpostal_town  (best guess from parser)
+        2. remaining libpostal_city_candidates  (other city-like tokens)
+        3. postal_town_candidate  (from postal-code DB lookup)
+
+    When ``mismatch_detected`` is set by Step 1, tries the
+    ``suggested_country_code`` first, then falls back to the original
+    ``country_code``.  This resolves cross-country addresses
+    deterministically instead of deferring to the LLM.
 
     When multiple cities share the same name, disambiguates using
     postal_admin1_code from Step 2. On first match, populates state
@@ -99,69 +117,119 @@ def match(state: dict) -> dict:
     state.setdefault("match_type", None)
     state.setdefault("match_confidence", 0.0)
 
-    candidates = [
-        state.get("libpostal_town"),
-        state.get("postal_town_candidate"),
-    ]
+    # Build country list: suggested CC first when mismatch detected
+    countries: list[str] = []
+    if state.get("mismatch_detected"):
+        suggested = (state.get("suggested_country_code") or "").upper()
+        if suggested and suggested != country_code:
+            countries.append(suggested)
+    countries.append(country_code)
 
-    for candidate in candidates:
-        if not candidate or not candidate.strip():
-            continue
+    # Build ordered candidate list: primary pick, then other city tokens,
+    # then postal-code hint.  Deduplicate while preserving order.
+    seen: set[str] = set()
+    candidates: list[str] = []
+    for c in (
+        [state.get("libpostal_town")]
+        + (state.get("libpostal_city_candidates") or [])
+        + [state.get("postal_town_candidate")]
+    ):
+        if c and c.strip() and c not in seen:
+            seen.add(c)
+            candidates.append(c)
 
-        norm = normalize_for_matching(candidate)
-        if not norm:
-            continue
-
-        # Fetch ALL matches so we can disambiguate
-        all_matches = resolve_all_cities_by_name(country_code, norm)
-        if not all_matches:
-            continue
-
-        # Pick the best match via disambiguation
-        if len(all_matches) == 1:
-            city = all_matches[0]
-        else:
-            city = _disambiguate(all_matches, postal_admin1_code, postal_region)
-            if not city:
+    for cc in countries:
+        for candidate in candidates:
+            if not candidate or not candidate.strip():
                 continue
 
-        # Determine match type
-        norm_primary = normalize_for_matching(city["name"])
-        norm_ascii = normalize_for_matching(city.get("ascii_name") or "")
+            norm = normalize_for_matching(candidate)
+            if not norm:
+                continue
 
-        if norm == norm_primary:
-            match_type = "primary"
-        elif norm == norm_ascii:
-            match_type = "ascii"
-        else:
-            match_type = "alternate"
+            # Fetch ALL matches so we can disambiguate
+            all_matches = resolve_all_cities_by_name(cc, norm)
+            if not all_matches:
+                continue
 
-        confidence = (
-            CONFIDENCE_EXACT_PRIMARY
-            if match_type in ("primary", "ascii")
-            else CONFIDENCE_EXACT_ALTERNATE
-        )
+            # Pick the best match via disambiguation
+            if len(all_matches) == 1:
+                city = all_matches[0]
+            else:
+                city = _disambiguate(all_matches, postal_admin1_code, postal_region)
+                if not city:
+                    continue
 
-        state["exact_match"] = True
-        state["geonames_id"] = city["geonameid"]
-        # When matched via alternate name, preserve the input spelling
-        # (e.g. "Morbi") rather than replacing with the GeoNames primary
-        # ("Morvi"), since the input likely uses the current official name.
-        state["town_candidate"] = (
-            candidate if match_type == "alternate" else city["name"]
-        )
-        state["match_type"] = match_type
-        state["match_confidence"] = confidence
+            # Determine match type
+            norm_primary = normalize_for_matching(city["name"])
+            norm_ascii = normalize_for_matching(city.get("ascii_name") or "")
 
-        logger.debug(
-            "Exact match: '%s' → %s (id=%d, type=%s, conf=%.2f, disambig=%s)",
-            candidate,
-            city["name"],
-            city["geonameid"],
-            match_type,
-            confidence,
-            "admin1" if postal_admin1_code else "population",
-        )
-        return state
+            if norm == norm_primary:
+                match_type = "primary"
+            elif norm == norm_ascii:
+                match_type = "ascii"
+            else:
+                match_type = "alternate"
+
+            confidence = (
+                CONFIDENCE_EXACT_PRIMARY
+                if match_type in ("primary", "ascii")
+                else CONFIDENCE_EXACT_ALTERNATE
+            )
+
+            state["exact_match"] = True
+            state["geonames_id"] = city["geonameid"]
+            # When matched via alternate name, preserve the input spelling
+            # (e.g. "Morbi") rather than replacing with the GeoNames primary
+            # ("Morvi"), since the input likely uses the current official name.
+            state["town_candidate"] = (
+                candidate if match_type == "alternate" else city["name"]
+            )
+            state["match_type"] = match_type
+            state["match_confidence"] = confidence
+
+            # Track which country was actually matched
+            if cc != country_code:
+                state["matched_country_code"] = cc
+
+            logger.debug(
+                "Exact match: '%s' → %s (id=%d, type=%s, conf=%.2f, cc=%s, disambig=%s)",
+                candidate,
+                city["name"],
+                city["geonameid"],
+                match_type,
+                confidence,
+                cc,
+                "admin1" if postal_admin1_code else "population",
+            )
+            return state
+
+    # ── Postal-code fallback ─────────────────────────────────────────
+    # Towns too small for cities500 (e.g. Taxila/PK) may exist only in
+    # the GeoNames postal-codes dataset.  Only try libpostal-derived
+    # candidates — skip postal_town_candidate to avoid circular matches
+    # (it already came from the postal table in Step 2).
+    postal_town = state.get("postal_town_candidate")
+    postal_candidates = [c for c in candidates if c != postal_town]
+    for cc in countries:
+        for candidate in postal_candidates:
+            norm = normalize_for_matching(candidate)
+            if not norm:
+                continue
+            postal_hits = search_postal_by_place_name_cc(norm, cc)
+            if postal_hits:
+                best = postal_hits[0]
+                state["exact_match"] = True
+                state["geonames_id"] = None
+                state["town_candidate"] = best["place_name"]
+                state["match_type"] = "postal"
+                state["match_confidence"] = CONFIDENCE_EXACT_ALTERNATE
+                if cc != country_code:
+                    state["matched_country_code"] = cc
+                logger.debug(
+                    "Postal fallback: '%s' → %s (cc=%s)",
+                    candidate, best["place_name"], cc,
+                )
+                return state
 
     return state

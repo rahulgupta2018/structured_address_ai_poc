@@ -13,6 +13,10 @@ import os
 from pathlib import Path
 from urllib.parse import urlparse
 
+from dotenv import load_dotenv
+
+load_dotenv(Path(__file__).resolve().parent.parent / ".env")
+
 logger = logging.getLogger(__name__)
 
 # ── Paths ────────────────────────────────────────────────────────────────────
@@ -94,20 +98,25 @@ OLLAMA_BASE_URL: str = _validated_ollama_url(
 )
 
 # ADK model identifiers
-LLM_MODEL_DEV: str = os.getenv("LLM_MODEL_DEV", "ollama_chat/qwen3.5")
+LLM_MODEL_DEV: str = os.getenv("LLM_MODEL_DEV", "ollama_chat/qwen2.5-coder:14b")
 LLM_MODEL_PROD: str = os.getenv("LLM_MODEL_PROD", "gemini-2.0-flash")
 LLM_MODEL: str = os.getenv("LLM_MODEL", LLM_MODEL_DEV)
 
 LLM_TEMPERATURE: float = 0.0
-LLM_MAX_TOKENS: int = 256
-LLM_TIMEOUT_SECONDS: int = int(os.getenv("LLM_TIMEOUT_SECONDS", "120"))
+LLM_MAX_TOKENS: int = int(os.getenv("LLM_MAX_TOKENS", "2048"))
+LLM_TIMEOUT_SECONDS: int = int(os.getenv("LLM_TIMEOUT_SECONDS", "180"))
 
 # Ollama parallelism — must match the server's OLLAMA_NUM_PARALLEL setting.
 # When running batch with concurrency > 1, this limits how many LLM calls
 # are in-flight simultaneously so requests don't time out waiting in Ollama's
 # queue.  Set to 1 for default Ollama, increase if you start Ollama with
 # OLLAMA_NUM_PARALLEL=N.
-LLM_CONCURRENCY: int = int(os.getenv("LLM_CONCURRENCY", "1"))
+LLM_CONCURRENCY: int = int(os.getenv("LLM_CONCURRENCY", "2"))
+
+# Maximum LLM round-trips per row (tool calls + final answer).
+# Thinking models (qwen3.5) resolve or fail within 2-3 turns;
+# extra turns burn tokens without progress.
+LLM_MAX_TURNS: int = int(os.getenv("LLM_MAX_TURNS", "2"))
 
 # ── Confidence score weights ────────────────────────────────────────────────
 

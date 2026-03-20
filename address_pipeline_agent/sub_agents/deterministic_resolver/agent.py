@@ -110,11 +110,14 @@ class DeterministicResolverAgent(BaseAgent):
         postal_lookup.lookup(state)
 
         # Step 3: GeoNames exact match
+        # (Steps 3 and 5 now handle mismatch_detected internally by trying
+        # suggested_country_code first, then falling back to country_code.)
         geonames_exact.match(state)
 
         if state.get("exact_match"):
             state["status"] = "resolved"
             state["parser_source"] = "libpostal"
+            state["confidence"] = state.get("match_confidence", 0.0)
             logger.debug(
                 "Row %s: Resolved deterministically (exact): %s",
                 ri, state.get("town_candidate"),
@@ -136,6 +139,7 @@ class DeterministicResolverAgent(BaseAgent):
             state["status"] = "resolved"
             state["parser_source"] = "geonames_scan"
             state["town_candidate"] = state.get("scan_candidate")
+            state["confidence"] = state.get("match_confidence", 0.0)
             logger.debug(
                 "Row %s: Resolved deterministically (scan): %s",
                 ri, state.get("town_candidate"),

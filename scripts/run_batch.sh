@@ -42,6 +42,13 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 cd "$PROJECT_ROOT"
 
+# ── Load .env (export vars for both shell banner and Python) ──
+if [[ -f "$PROJECT_ROOT/.env" ]]; then
+    set -a
+    source "$PROJECT_ROOT/.env"
+    set +a
+fi
+
 # ── Activate virtual environment ──────────────────────────────
 if [[ -d "$PROJECT_ROOT/.venv" ]]; then
     source "$PROJECT_ROOT/.venv/bin/activate"

@@ -335,10 +335,20 @@ CSV Batch (from GCS) or API Request
   │     ├─ Extract town, street, building, postal_code, state
   │     └─ Build town_candidate
   │
-  ├─ Step 2: Postal Code Cross-Reference (NEW)
-  │     ├─ Lookup postal code → expected region + expected city
-  │     ├─ If postal code maps to a known city → strong disambiguation signal
-  │     └─ Store as context for downstream steps
+  ├─ Step 2: Postal Code Cross-Reference (Enhanced — 3-tier fallback)
+  │     ├─ Tier 1 (Primary): postal_code + country_code
+  │     │     → Direct lookup in GeoNames postal_codes table
+  │     ├─ Tier 2 (Suggested-country): postal_code + suggested_country_code
+  │     │     → Used when Tier 1 returns nothing AND Step 1 detected a
+  │     │       country mismatch (e.g. address says Thailand but CC=US)
+  │     ├─ Tier 3 (Postal-only): postal_code without country filter
+  │     │     ├─ Cross-reference results with suggested_country_code
+  │     │     ├─ Or accept if all results point to a single country
+  │     │     └─ Reject as ambiguous if multi-country, no disambiguation hint
+  │     ├─ Output: postal_town_candidate, postal_admin1_code, postal_region,
+  │     │          postal_city_hint, postal_lookup_method
+  │     └─ postal_lookup_method tracks which tier resolved:
+  │           "primary" | "suggested_country" | "postal_only" | None
   │
   ├─ Step 3: GeoNames Exact Validation (Enhanced)
   │     ├─ Exact match of town_candidate against GeoNames (country-scoped)
@@ -504,6 +514,7 @@ Signals are applied in order of reliability. Each signal either **resolves** the
 | `disambiguation_confidence` | `float` | Confidence in the disambiguation itself |
 | `matched_admin1` | `string \| null` | Admin1 region of the matched city |
 | `postal_code_region` | `string \| null` | Region derived from postal code lookup |
+| `postal_lookup_method` | `string \| null` | Which fallback tier resolved: `"primary"` (postal+country), `"suggested_country"` (postal+Step 1 suggested CC), `"postal_only"` (postal without country), or `null` (no match) |
 
 ### 7.5 Postal Code Extraction from Raw Address
 

@@ -6,7 +6,7 @@ LLM skip logic:
 
     1. DeterministicResolver  (always)
     2. LlmAddressParser       (only if status == "unresolved")
-    3. Revalidation            (always, except rejected)
+    3. Revalidation            (only if status != "resolved", i.e. LLM path)
     4. Persist                 (always)
 
 Exports ``root_agent`` for ADK and ``batch_runner``.
@@ -157,9 +157,12 @@ class AddressPipelineAgent(BaseAgent):
         else:
             logger.debug("Skipping LLM (status=%s): %s", state.get("status"), row_key)
 
-        # ── Step 3: Revalidation ───────────────────────────────────────
-        async for event in self.revalidation.run_async(ctx):
-            yield event
+        # ── Step 3: Revalidation (LLM path only) ──────────────────────
+        if state.get("status") != "resolved":
+            async for event in self.revalidation.run_async(ctx):
+                yield event
+        else:
+            logger.debug("Skipping revalidation (deterministic resolved): %s", row_key)
 
         # ── Step 4: Persist ────────────────────────────────────────────
         async for event in self.persist.run_async(ctx):

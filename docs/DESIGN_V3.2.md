@@ -1,6 +1,6 @@
 # Structured Address AI v3 — ADK Agentic Pipeline Architecture
 
-> **Version:** 3.2 — _18 February 2026_
+> **Version:** 3.2 — _18 March 2026_
 > **Status:** Proposed — Refactors v2 pipeline as a Google ADK agent workflow
 > **Prerequisite:** [DESIGN_V2.md](./DESIGN_V2.md) — production infrastructure, data architecture, security, cost model
 > **Audience:** Engineering, Architecture Review
@@ -14,7 +14,8 @@
 3. [ADK Agent Types — Quick Reference](#3-adk-agent-types--quick-reference)
 4. [Architecture Overview](#4-architecture-overview)
 5. [Architecture Diagram](#5-architecture-diagram)
-6. [Agent Definitions](#6-agent-definitions)
+6. [Processing Pipeline — Step by Step](#5a-processing-pipeline--step-by-step)
+7. [Agent Definitions](#6-agent-definitions)
 7. [Orchestrator: AddressPipelineAgent](#7-orchestrator-addresspipelineagent)
 8. [Session State Contract](#8-session-state-contract)
 9. [ADK Runtime Modes](#9-adk-runtime-modes)
@@ -83,7 +84,7 @@ An earlier draft of this document wrapped every pipeline step (0–8) as a separ
 |----------------------------|------|
 | **Orchestrator** (Steps 0→8) | Conditional routing: skip LLM if resolved early. Needs `_run_async_impl`. |
 | **LLM parser** (Step 6) | Uses LLM reasoning, tool calling, structured output. Must be `LlmAgent`. |
-| **Revalidation** (Step 7) | Safety-net that runs on all paths. Will evolve (multi-source validation, confidence recalculation). Separate agent = independent testing, clear ADK trace event. |
+| **Revalidation** (Step 7) | LLM-path-only safety net. Will evolve (multi-source validation, confidence recalculation). Separate agent = independent testing, clear ADK trace event. Deterministic paths skip Step 7 — their confidence is set directly. |
 | **Persist** (Step 8) | I/O side effects (Cloud SQL, GCS, review queue). Isolating I/O from logic aids testing and error handling. Separate ADK trace event. |
 
 | What should be plain functions? | Why? |
@@ -164,8 +165,8 @@ AddressPipelineAgent (CustomAgent — orchestrator)
   │       SKIPPED if DeterministicResolverAgent resolved the row
   │
   ├── 3. RevalidationAgent (CustomAgent)
-  │       Step 7: safety-net GeoNames re-check on resolved town
-  │       Always runs regardless of path
+  │       Step 7: safety-net GeoNames re-check on LLM-resolved town
+  │       Only runs on the LLM path (after Step 6)
   │
   └── 4. PersistAgent (CustomAgent)
           Step 8: write to Cloud SQL + GCS + review queue
@@ -179,7 +180,7 @@ AddressPipelineAgent (CustomAgent — orchestrator)
 | — | `AddressPipelineAgent` | `CustomAgent` | All | ❌ | Orchestrator: accepts input, routes through sub-agents, handles conditional skip |
 | 1 | `DeterministicResolverAgent` | `CustomAgent` | 0–5 | ❌ | Runs all deterministic resolution logic as plain function calls. Sets `status=validated` if resolved. |
 | 2 | `LlmAddressParserAgent` | `LlmAgent` | 6 | ✅ | Agentic LLM with 5 GeoNames tools. Only called for unresolved rows (~15%). |
-| 3 | `RevalidationAgent` | `CustomAgent` | 7 | ❌ | Safety-net: re-validates resolved town against GeoNames. Adjusts confidence. |
+| 3 | `RevalidationAgent` | `CustomAgent` | 7 | ❌ | Safety-net: re-validates **LLM-resolved** town against GeoNames. Only runs on LLM path. Deterministic paths (Steps 3/5) already use GeoNames directly — re-checking adds no value. |
 | 4 | `PersistAgent` | `CustomAgent` | 8 | ❌ | I/O: writes results to Cloud SQL, GCS, enqueues `needs_review` rows. |
 
 ### Flow Summary
@@ -189,20 +190,135 @@ Input → Orchestrator
          │
          ├─→ DeterministicResolverAgent (Steps 0–5)
          │     │
-         │     ├── if resolved ──→ skip LLM ──┐
-         │     │                               │
-         │     └── if unresolved               │
-         │           │                         │
-         │           ▼                         │
-         │     LlmAddressParserAgent (Step 6)  │
-         │           │                         │
-         │           ▼                         │
-         ├───────────┴─────────────────────────┘
-         │
-         ├─→ RevalidationAgent (Step 7) — always runs
-         │
+         │     ├── if resolved ──→ skip LLM ──→ PersistAgent (Step 8)
+         │     │
+         │     └── if unresolved
+         │           │
+         │           ▼
+         │     LlmAddressParserAgent (Step 6)
+         │           │
+         │           ▼
+         │     RevalidationAgent (Step 7) — LLM path only
+         │           │
+         │           ▼
          └─→ PersistAgent (Step 8) — always runs
 ```
+
+**Three pipeline flows:**
+
+| Flow | Path | Trigger |
+|------|------|---------|
+| Flow 1 | Steps 0→1→2→3→8 | Step 3 resolves with exact match (confidence ≥ 0.95) |
+| Flow 2 | Steps 0→1→2→3→4→5→8 | Step 5 resolves via scanner (confidence 0.80) |
+| Flow 3 | Steps 0→1→2→3→4→5→6→7→8 | LLM fallback — Step 7 prevents hallucination |
+
+### Horizontal Swim Lane Diagram
+
+> **Interactive version:** Open [`pipeline_swimlane.drawio`](./pipeline_swimlane.drawio) in [draw.io](https://app.diagrams.net) for a colour-coded, editable diagram with proper arrows and layout.
+
+Each lane represents a pipeline step (service). Boxes are tasks, diamonds
+are decisions. The three flows share a common entry and diverge at the
+decision points after Step 3 and Step 5.
+
+```
+┌─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                                          ADDRESS RESOLUTION PIPELINE                                                    │
+├────────────┬────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+│            │                                                                                                            │
+│  Step 0    │  ┌──────────────────┐                                                                                      │
+│  Preprocess│  │ Concat addr lines│──→ raw_address, normalized                                                           │
+│            │  │ NFKC + casefold  │                                                                                      │
+│            │  └────────┬─────────┘                                                                                      │
+│            │           │                                                                                                │
+├────────────┼───────────┼────────────────────────────────────────────────────────────────────────────────────────────────┤
+│            │           ▼                                                                                                │
+│  Step 1    │  ┌──────────────────┐                                                                                      │
+│  Parser    │  │ libpostal parse  │──→ town, street, building, postal_code, city_candidates                              │
+│  (libpostal│  │ + country detect │──→ mismatch_detected?, suggested_cc?                                                 │
+│            │  └────────┬─────────┘                                                                                      │
+│            │           │                                                                                                │
+├────────────┼───────────┼────────────────────────────────────────────────────────────────────────────────────────────────┤
+│            │           ▼                                                                                                │
+│  Step 2    │  ┌──────────────────┐                                                                                      │
+│  Postal    │  │ 3-tier lookup    │──→ postal_region, admin1_code, city_hint                                             │
+│  Lookup    │  │ T1: cc+postal    │                                                                                      │
+│            │  │ T2: suggested_cc │                                                                                      │
+│            │  │ T3: postal-only  │                                                                                      │
+│            │  └────────┬─────────┘                                                                                      │
+│            │           │                                                                                                │
+├────────────┼───────────┼────────────────────────────────────────────────────────────────────────────────────────────────┤
+│            │           ▼                                                                                                │
+│  Step 3    │  ┌──────────────────┐      ◆ exact_match?                                                                  │
+│  Exact     │  │ GeoNames lookup  │──→  ╱ ╲                                                                              │
+│  Match     │  │ + disambiguate   │   ╱     ╲                                                                            │
+│            │  └──────────────────┘  ╱  YES   ╲──→ status="resolved", conf ≥ 0.95 ───────────────────────┐               │
+│            │                        ╲       ╱                                                            │               │
+│            │                          ╲   ╱                                                              │               │
+│            │                        NO  ◆                                                                │               │
+│            │                            │                                                                │               │
+├────────────┼────────────────────────────┼────────────────────────────────────────────────────────────────┼───────────────┤
+│            │                            ▼                                                                │               │
+│  Step 4    │                   ┌──────────────────┐                                                      │               │
+│  Mismatch  │                   │ Cross-country    │──→ mismatch_detected, suggested_cc                   │               │
+│  Detect    │                   │ city-name check  │                                                      │               │
+│            │                   └────────┬─────────┘                                                      │               │
+│            │                            │                                                                │               │
+├────────────┼────────────────────────────┼────────────────────────────────────────────────────────────────┼───────────────┤
+│            │                            ▼                                                                │               │
+│  Step 5    │                   ┌──────────────────┐      ◆ scan_match?                                   │               │
+│  Scanner   │                   │ N-gram + fuzzy   │──→  ╱ ╲                                              │               │
+│            │                   │ raw addr vs city │   ╱     ╲                                            │               │
+│            │                   │ name lexicon     │  ╱  YES   ╲──→ status="resolved", conf=0.80 ──┐     │               │
+│            │                   └──────────────────┘  ╲       ╱                                     │     │               │
+│            │                                           ╲   ╱                                       │     │               │
+│            │                                         NO  ◆                                         │     │               │
+│            │                                             │                                         │     │               │
+├────────────┼─────────────────────────────────────────────┼─────────────────────────────────────────┼─────┼───────────────┤
+│            │                                             ▼                                         │     │               │
+│  Step 6    │                                    ┌──────────────────┐                                │     │               │
+│  LLM       │                                    │ LLM Agent        │                                │     │               │
+│  Parser    │                                    │ 5 GeoNames tools │──→ llm_result (town, etc.)     │     │               │
+│  (≈15%     │                                    │ max 5 tool calls │                                │     │               │
+│   of rows) │                                    └────────┬─────────┘                                │     │               │
+│            │                                             │                                         │     │               │
+├────────────┼─────────────────────────────────────────────┼─────────────────────────────────────────┼─────┼───────────────┤
+│            │                                             ▼                                         │     │               │
+│  Step 7    │                                    ┌──────────────────┐                                │     │               │
+│  Revalidate│                                    │ GeoNames re-check│                                │     │               │
+│  (LLM path │                                    │ exact + fuzzy    │──→ status, confidence          │     │               │
+│   only)    │                                    │ hallucination    │                                │     │               │
+│            │                                    │ prevention       │                                │     │               │
+│            │                                    └────────┬─────────┘                                │     │               │
+│            │                                             │                                         │     │               │
+├────────────┼─────────────────────────────────────────────┼─────────────────────────────────────────┼─────┼───────────────┤
+│            │                                             │                                         │     │               │
+│  Step 8    │                                             ▼                                         ▼     ▼               │
+│  Persist   │                                    ┌──────────────────────────────────────────────────────────┐              │
+│            │                                    │ Assemble final_result, map status, round confidence,     │              │
+│            │                                    │ join warnings, compute review_reason                     │              │
+│            │                                    │ Write: Cloud SQL + GCS + review queue                    │              │
+│            │                                    └────────┬─────────────────────────────────────────────────┘              │
+│            │                                             │                                                               │
+│            │                                             ▼                                                               │
+│            │                                      ╔════════════╗                                                         │
+│            │                                      ║ final_result║                                                         │
+│            │                                      ╚════════════╝                                                         │
+│            │                                                                                                            │
+├────────────┼────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+│  FLOWS     │  Flow 1: ■■■ Step 0 → 1 → 2 → 3 ═══════════════════════════════════════════════════════════► 8             │
+│            │  Flow 2: ■■■ Step 0 → 1 → 2 → 3 → 4 → 5 ══════════════════════════════════════════════════► 8             │
+│            │  Flow 3: ■■■ Step 0 → 1 → 2 → 3 → 4 → 5 → 6 → 7 ═════════════════════════════════════════► 8             │
+└────────────┴────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+```
+
+**Reading the diagram:**
+- Each horizontal band is a pipeline step (service).
+- Vertical flow moves top-to-bottom through the steps.
+- Diamond (◆) nodes are decision points where flows diverge.
+- **Flow 1** exits at Step 3's YES branch → jumps directly to Step 8.
+- **Flow 2** exits at Step 5's YES branch → jumps directly to Step 8.
+- **Flow 3** falls through all NO branches → Steps 6, 7, then 8.
+- The bottom summary row shows each flow's path as a horizontal bar.
 
 ---
 
@@ -233,8 +349,10 @@ User Input (address row via adk web / adk api_server / adk run)
 │  │  Step 1: libpostal_parse(state)                                  │  │
 │  │    → town_candidate, street, building, postal_code               │  │
 │  │                                                                  │  │
-│  │  Step 2: postal_code_lookup(state)                               │  │
-│  │    → postal_region, postal_city_hint                             │  │
+│  │  Step 2: postal_code_lookup(state)  (3-tier fallback)            │  │
+│  │    → Tier 1: postal+country  │  Tier 2: postal+suggested_cc   │  │
+│  │    → Tier 3: postal-only (disambiguated or single-country)      │  │
+│  │    → postal_region, postal_city_hint, postal_lookup_method      │  │
 │  │                                                                  │  │
 │  │  Step 3: exact_match(state)                                      │  │
 │  │    → if confident match: status="validated" → DONE               │  │
@@ -263,12 +381,13 @@ User Input (address row via adk web / adk api_server / adk run)
 │                                     │                          │     │
 │                                     ▼                          │     │
 │  ┌──────────────────────────────────┴──────────────────────┐   │     │
-│  │  RevalidationAgent (CustomAgent — Step 7)  ◄────────────┘   │     │
-│  │  Always runs. Safety-net GeoNames re-check.              │         │
-│  │  → state: final status, confidence_score                 │         │
-│  └──────────────────────────────────┬──────────────────────┘         │
-│                                     ▼                                │
-│  ┌─────────────────────────────────────────────────────────┐         │
+│  │  RevalidationAgent (CustomAgent — Step 7)               │   │     │
+│  │  LLM path only. Safety-net GeoNames re-check.           │   │     │
+│  │  → state: final status, confidence_score                 │   │     │
+│  └──────────────────────────────────┬──────────────────────┘   │     │
+│                                     │                          │     │
+│                                     ▼                          │     │
+│  ┌──────────────────────────────────┴──────────────────────────┘     │
 │  │  PersistAgent (CustomAgent — Step 8)                     │         │
 │  │  Always runs. Cloud SQL + GCS + review queue.            │         │
 │  │  → state: final_result                                   │         │
@@ -282,8 +401,173 @@ User Input (address row via adk web / adk api_server / adk run)
 
 1. **Early exit within DeterministicResolverAgent** — If Step 3 (exact match) resolves the row, Steps 4–5 are skipped inside the agent. This is internal conditional logic, not inter-agent routing.
 2. **Conditional LLM skip** — The orchestrator checks `state["status"]` after `DeterministicResolverAgent`. If `"validated"`, it skips `LlmAddressParserAgent` entirely. This saves LLM cost on ~85% of rows.
-3. **Steps 7–8 always run** — `RevalidationAgent` and `PersistAgent` execute on every path — whether resolved at Step 3, Step 5, or Step 6.
-4. **All state in `ctx.session.state`** — No custom dict-passing. ADK manages the session.
+3. **Step 7 runs only on the LLM path** — `RevalidationAgent` runs after Step 6 only. Deterministic paths (Steps 3/5) already resolve against GeoNames directly — re-checking adds no new information and can regress correct results (e.g. Ko Lanta overriding Krabi). Step 7's purpose is to prevent LLM hallucination.
+4. **Step 8 always runs** — `PersistAgent` executes on every path — whether resolved at Step 3, Step 5, or Step 6+7.
+5. **All state in `ctx.session.state`** — No custom dict-passing. ADK manages the session.
+
+---
+
+## 5A. Processing Pipeline — Step by Step
+
+While the architecture diagram (§5) shows the agent flow, this section documents the **detailed logic of each pipeline step** — what each function reads, writes, and decides. These are the plain Python functions called inside the agents.
+
+### Pipeline Flow Diagram
+
+```
+CSV Batch (from GCS) or API Request
+  │
+  ├─ Step 0: preprocess(state)    ─── services/normalizer.py
+  │     ├─ Reads:  address_1, address_2, address_3
+  │     ├─ Writes: raw_address         (concatenated address lines)
+  │     │          normalized           (NFKC + casefold + whitespace collapse)
+  │     │          warnings             (appended if no address data)
+  │     └─ Early exit: if validation_errors → status="rejected"
+  │
+  ├─ Step 1: parse(state)         ─── services/libpostal_parser.py
+  │     ├─ Reads:  raw_address, country_code
+  │     ├─ Writes: libpostal_town              (best city candidate or None)
+  │     │          libpostal_postal_code        (postal code or None)
+  │     │          libpostal_street             (street or None)
+  │     │          libpostal_building           (house number or None)
+  │     │          libpostal_city_candidates    (all city-like tokens, list)
+  │     │          libpostal_country            (country name from text or None)
+  │     │          mismatch_detected            (bool, if address says different country)
+  │     │          suggested_country_code       (ISO alpha-2, if mismatch detected)
+  │     │          warnings                     (appended with parse warnings)
+  │     └─ Mismatch detection: if libpostal-detected country ≠ input
+  │           country_code → flags mismatch + suggests correct CC
+  │
+  ├─ Step 2: lookup(state)        ─── services/postal_lookup.py
+  │     ├─ Reads:  libpostal_postal_code, country_code,
+  │     │          suggested_country_code (optional, from Step 1)
+  │     ├─ 3-tier fallback strategy:
+  │     │     Tier 1 (Primary): postal_code + country_code
+  │     │       → Direct lookup in GeoNames postal_codes table
+  │     │     Tier 2 (Suggested-country): postal_code + suggested_country_code
+  │     │       → When Tier 1 returns nothing AND Step 1 detected
+  │     │         a country mismatch (e.g. address says TH but CC=US)
+  │     │     Tier 3 (Postal-only): postal_code without country filter
+  │     │       → Cross-reference with suggested_country_code
+  │     │       → Accept if all rows point to a single country
+  │     │       → Reject as ambiguous if multi-country, no hint
+  │     ├─ Writes: postal_town_candidate       (place name or None)
+  │     │          postal_admin1_code           (admin1 code, e.g. "IL")
+  │     │          postal_region                (admin1 name, e.g. "Illinois")
+  │     │          postal_city_hint             (alias for postal_town_candidate)
+  │     │          postal_lookup_method         (which tier matched)
+  │     └─ postal_lookup_method values:
+  │           "primary" | "suggested_country" | "postal_only" | None
+  │
+  ├─ Step 3: match(state)         ─── services/geonames_exact.py
+  │     ├─ Reads:  libpostal_town, libpostal_city_candidates,
+  │     │          postal_town_candidate, postal_admin1_code,
+  │     │          postal_region, country_code,
+  │     │          mismatch_detected, suggested_country_code
+  │     ├─ Multi-country resolution (when mismatch_detected):
+  │     │     Try suggested_country_code FIRST, then country_code.
+  │     │     Prevents false positives (e.g. "Long" matching US city
+  │     │     when the address is actually in Thailand).
+  │     ├─ Resolution strategy (per country):
+  │     │     1. Try libpostal_town against GeoNames (country-scoped)
+  │     │     2. Try each libpostal_city_candidate
+  │     │     3. Try postal_town_candidate as last resort
+  │     │     4. If multiple matches → disambiguate using:
+  │     │        a. Postal admin1 code match
+  │     │        b. Postal region match
+  │     │        c. Population fallback (largest city)
+  │     ├─ Writes: exact_match          (bool)
+  │     │          geonames_id           (int or None)
+  │     │          town_candidate        (resolved city name)
+  │     │          match_type            ("primary" or "alternate")
+  │     │          match_confidence      (1.0 for primary, 0.95 for alternate)
+  │     │          matched_country_code  (if resolved in suggested CC)
+  │     ├─ match → ✅ status="validated" (source=libpostal), DONE
+  │     └─ no match → continue to Step 4
+  │
+  ├─ Step 4: detect(state)        ─── services/mismatch_detector.py
+  │     ├─ Only runs if Step 3 did NOT resolve the row
+  │     ├─ Reads:  libpostal_town, town_candidate, country_code
+  │     ├─ Checks: does the city name exist in a DIFFERENT country's GeoNames?
+  │     ├─ Writes: mismatch_detected           (bool)
+  │     │          suggested_country_code       (corrected CC or None)
+  │     └─ Note: Step 1 may have already flagged a mismatch via libpostal_country.
+  │           Step 4 adds a second check using the city-name cross-country lookup.
+  │
+  ├─ Step 5: scan(state)          ─── services/address_scanner.py
+  │     ├─ Only runs if Step 3 did NOT resolve the row
+  │     ├─ Reads:  raw_address, country_code,
+  │     │          mismatch_detected, suggested_country_code
+  │     ├─ Multi-country scan (when mismatch_detected):
+  │     │     Scan suggested_country_code FIRST, then country_code.
+  │     ├─ Strategy: tokenize raw address into n-grams, match against
+  │     │   all known city names for the given country (exact + fuzzy)
+  │     ├─ Writes: scan_match            (bool)
+  │     │          scan_candidate         (matched city name)
+  │     │          geonames_id            (int)
+  │     │          match_type             (e.g. "exact_ngram", "fuzzy_scan")
+  │     │          match_confidence       (scan confidence score)
+  │     ├─ match → ✅ status="validated" (source=geonames_scan), DONE
+  │     └─ no match → status="unresolved" → LLM fallback (Step 6)
+  │
+  ├─ Step 6: LLM Agent            ─── LlmAddressParserAgent
+  │     ├─ Only runs if Steps 0–5 did NOT resolve the row (~15% of rows)
+  │     ├─ ADK LlmAgent with 5 GeoNames tools:
+  │     │     query_city, query_postal_code, query_admin1,
+  │     │     search_city_fuzzy, list_countries_for_city
+  │     ├─ Agent reasons over the address, calls tools to ground its answer,
+  │     │   and self-corrects if initial parse doesn't match GeoNames
+  │     ├─ Max 5 tool calls per row (budget cap)
+  │     ├─ Output: structured JSON (town, street, building, postal_code)
+  │     └─ Writes: llm_result (dict with agent's structured output)
+  │
+  ├─ Step 7: revalidate(state)    ─── RevalidationAgent
+  │     ├─ Only runs on LLM path (after Step 6)
+  │     ├─ Deterministic paths (Step 3/5) skip directly to Step 8
+  │     │   (they already resolve against GeoNames — re-checking is redundant)
+  │     ├─ Re-validates LLM-resolved town against GeoNames:
+  │     │     1. Exact match (normalized name vs country-scoped lexicon)
+  │     │     2. If no exact → fuzzy match (token_set_ratio ≥ 80)
+  │     ├─ Adjusts confidence, applies disambiguation signals
+  │     ├─ Writes: status              ("validated" | "needs_review" | "rejected")
+  │     │          confidence_score     (0.00–1.00)
+  │     │          review_reason        (if needs_review)
+  │     ├─ match → ✅ validated (source preserved from resolving step)
+  │     └─ town present but no match → ⚠️ needs_review
+  │
+  └─ Step 8: persist(state)       ─── PersistAgent
+        ├─ ALWAYS runs (on all paths)
+        ├─ Write to Cloud SQL (audit trail)
+        ├─ Write results CSV to GCS output bucket
+        ├─ Write needs_review rows to separate CSV
+        ├─ Update job progress in Cloud SQL
+        └─ Writes: final_result (complete result record)
+```
+
+### Key Observations from Testing
+
+Based on comprehensive testing of Steps 0–3 with real database and real libpostal:
+
+| Observation | Detail | Impact |
+|---|---|---|
+| **Postal codes are NOT globally unique** | 81150 exists in FR, PK, TH, UA (4 countries). 10115 exists in 7 countries. 08042 exists in 7 countries. | Postal-only fallback (Tier 3) must disambiguate or reject ambiguous codes |
+| **Step 1 mismatch detection is critical** | When address text says "Thailand" but CC=US, Step 1 flags `mismatch_detected=True` and `suggested_country_code=TH`. This enables Step 2 Tier 2 fallback. | Without mismatch detection, Tier 2 cannot fire — wrong-CC addresses get no postal signal |
+| **Suggested-CC-first prevents false positives** | Thai address "Long Beach Pra-Ae Beach" + wrong CC=US — previously "long" matched a US city. Now Steps 3 & 5 try `suggested_country_code` first when `mismatch_detected`, resolving Krabi in TH deterministically. | Multi-country fallback in Steps 3 & 5 eliminates wrong-CC false positives. Step 7 only runs on LLM path to prevent hallucination |
+| **62701 is US-only** | Unique postal code — Tier 3 postal-only resolves it even without country | Demonstrates the value of single-country postal codes for recovery |
+
+### State Flow Across Steps (Implemented)
+
+This table shows the actual state keys written by each step, verified against the real service implementations:
+
+| Step | Service | Reads | Writes |
+|---|---|---|---|
+| 0 | `normalizer.preprocess()` | `address_1`, `address_2`, `address_3` | `raw_address`, `normalized`, `warnings` |
+| 1 | `libpostal_parser.parse()` | `raw_address`, `country_code` | `libpostal_town`, `libpostal_postal_code`, `libpostal_street`, `libpostal_building`, `libpostal_city_candidates`, `libpostal_country`, `mismatch_detected`*, `suggested_country_code`* |
+| 2 | `postal_lookup.lookup()` | `libpostal_postal_code`, `country_code`, `suggested_country_code`* | `postal_town_candidate`, `postal_admin1_code`, `postal_region`, `postal_city_hint`, `postal_lookup_method` |
+| 3 | `geonames_exact.match()` | `libpostal_town`, `libpostal_city_candidates`, `postal_town_candidate`, `postal_admin1_code`, `postal_region`, `country_code`, `mismatch_detected`*, `suggested_country_code`* | `exact_match`, `geonames_id`, `town_candidate`, `match_type`, `match_confidence`, `matched_country_code`* |
+| 4 | `mismatch_detector.detect()` | `libpostal_town`, `town_candidate`, `country_code` | `mismatch_detected`, `suggested_country_code` |
+| 5 | `address_scanner.scan()` | `raw_address`, `country_code`, `mismatch_detected`*, `suggested_country_code`* | `scan_match`, `scan_candidate`, `geonames_id`, `match_type`, `match_confidence` |
+
+\* *Written conditionally — only when a country mismatch is detected in the address text.*
 
 ---
 
@@ -773,21 +1057,30 @@ All agents share a single `ctx.session.state` dictionary. Here is the complete c
 
 | Key | Set By Step | Type | Description |
 |-----|------------|------|-------------|
-| `normalized_address` | 0 | `str` | NFKC-normalized, casefolded, whitespace-collapsed |
-| `extracted_postal_code` | 0 | `str \| None` | Postal code extracted via regex |
+| `raw_address` | 0 | `str` | Concatenated address lines |
+| `normalized` | 0 | `str` | NFKC-normalized, casefolded, whitespace-collapsed |
+| `warnings` | 0, 1 | `list[str]` | Accumulated warnings (empty = clean) |
 | `validation_errors` | 0 | `list[str]` | Schema validation errors (empty = valid) |
-| `town_candidate` | 1 | `str` | libpostal-extracted town name |
-| `street` | 1 | `str` | libpostal-extracted street |
-| `building` | 1 | `str` | libpostal-extracted building number |
-| `libpostal_postal_code` | 1 | `str` | libpostal-extracted postal code |
-| `libpostal_state` | 1 | `str` | libpostal-extracted state/province |
-| `postal_region` | 2 | `str \| None` | Admin1 region name from postal code lookup |
-| `postal_city_hint` | 2 | `str \| None` | City name hint from postal code |
-| `postal_admin1_code` | 2 | `str \| None` | Admin1 code from postal code |
-| `exact_match_result` | 3 | `dict \| None` | Full match record if found |
-| `mismatch_detected` | 4 | `bool` | Whether country-code mismatch was detected |
-| `suggested_country_code` | 4 | `str \| None` | Corrected country code |
-| `mismatch_signals` | 4 | `list[str]` | Signals that triggered mismatch |
+| `libpostal_town` | 1 | `str \| None` | Best city candidate from libpostal |
+| `libpostal_postal_code` | 1 | `str \| None` | Postal code from libpostal |
+| `libpostal_street` | 1 | `str \| None` | Street from libpostal |
+| `libpostal_building` | 1 | `str \| None` | Building/house number from libpostal |
+| `libpostal_city_candidates` | 1 | `list[str]` | All city-like tokens from libpostal |
+| `libpostal_country` | 1 | `str \| None` | Country name extracted from address text |
+| `mismatch_detected` | 1, 4 | `bool` | Whether country-code mismatch was detected (set by Step 1 from address text, may be updated by Step 4 from cross-country city lookup) |
+| `suggested_country_code` | 1, 4 | `str \| None` | Corrected country code when mismatch detected |
+| `postal_town_candidate` | 2 | `str \| None` | City name hint from postal code lookup |
+| `postal_admin1_code` | 2 | `str \| None` | Admin1 code from postal code (e.g. "IL") |
+| `postal_region` | 2 | `str \| None` | Admin1 region name from postal code (e.g. "Illinois") |
+| `postal_city_hint` | 2 | `str \| None` | Alias for `postal_town_candidate` |
+| `postal_lookup_method` | 2 | `str \| None` | Which fallback tier resolved: `"primary"`, `"suggested_country"`, `"postal_only"`, or `None` |
+| `exact_match` | 3 | `bool` | Whether exact city match was found |
+| `geonames_id` | 3, 5 | `int \| None` | GeoNames ID of matched city |
+| `town_candidate` | 3 | `str \| None` | Resolved city name from exact match |
+| `match_type` | 3, 5 | `str \| None` | `"primary"`, `"alternate"`, `"exact_ngram"`, `"fuzzy_scan"` |
+| `match_confidence` | 3, 5 | `float` | Confidence score (1.0 primary, 0.95 alternate, varies for scan) |
+| `scan_match` | 5 | `bool` | Whether fuzzy scan found a match |
+| `scan_candidate` | 5 | `str \| None` | City name from fuzzy scan |
 
 ### 8.3 Keys Set by LlmAddressParserAgent
 

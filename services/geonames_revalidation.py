@@ -1,8 +1,10 @@
 """
 GeoNames re-validation (Step 7).
 
-Safety-net re-validation of the resolved town against GeoNames.
-Runs for ALL rows (both deterministic and LLM paths).
+Safety-net re-validation of the LLM-proposed town against GeoNames.
+Runs only for LLM-path rows (Flow 3). Deterministic paths (Flow 1 /
+Flow 2) skip this step — their confidence is set directly by the
+DeterministicResolverAgent.
 
 Operates on session state dict:
   Reads:  state["town_candidate"] or state["llm_result"],

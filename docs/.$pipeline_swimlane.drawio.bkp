@@ -1,0 +1,515 @@
+<mxfile host="65bd71144e">
+    <diagram id="pipeline-swimlane" name="Address Resolution Pipeline">
+        <mxGraphModel dx="1200" dy="900" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="2800" pageHeight="2400" math="0" shadow="0">
+            <root>
+                <mxCell id="0"/>
+                <mxCell id="1" parent="0"/>
+
+                <!-- ════════════════════════════════════════════════════════════
+                     POOL TABLE  (swim-lane container)
+                     ════════════════════════════════════════════════════════════ -->
+                <mxCell id="pool1" value="ADDRESS RESOLUTION PIPELINE" style="shape=table;startSize=40;container=1;collapsible=0;childLayout=tableLayout;fixedRows=1;rowLines=1;fontStyle=1;align=center;resizeLast=1;fontSize=16;fillColor=#dae8fc;strokeColor=#6c8ebf;" parent="1" vertex="1">
+                    <mxGeometry x="40" y="40" width="2700" height="2200" as="geometry"/>
+                </mxCell>
+
+                <!-- Lane 0 — Step 0 Preprocess -->
+                <mxCell id="lane0" value="" style="shape=tableRow;horizontal=0;startSize=0;swimlaneHead=0;swimlaneBody=0;fillColor=none;collapsible=0;dropTarget=0;points=[[0,0.5],[1,0.5]];portConstraint=eastwest;fontSize=12;" parent="pool1" vertex="1">
+                    <mxGeometry y="40" width="2700" height="120" as="geometry"/>
+                </mxCell>
+                <mxCell id="lane0_hdr" value="Step 0&#xa;Preprocess" style="shape=partialRectangle;connectable=0;fillColor=#f5f5f5;top=0;left=0;bottom=0;right=0;fontStyle=1;overflow=hidden;fontSize=11;align=center;strokeColor=#666666;fontColor=#333333;" parent="lane0" vertex="1">
+                    <mxGeometry width="140" height="120" as="geometry"/>
+                </mxCell>
+                <mxCell id="lane0_body" value="" style="shape=partialRectangle;connectable=0;fillColor=none;top=0;left=0;bottom=0;right=0;align=left;spacingLeft=10;overflow=hidden;" parent="lane0" vertex="1">
+                    <mxGeometry x="140" width="2560" height="120" as="geometry"/>
+                </mxCell>
+
+                <!-- Lane 1 — Step 1 Parser + Mismatch Decision -->
+                <mxCell id="lane1" value="" style="shape=tableRow;horizontal=0;startSize=0;swimlaneHead=0;swimlaneBody=0;fillColor=none;collapsible=0;dropTarget=0;points=[[0,0.5],[1,0.5]];portConstraint=eastwest;fontSize=12;" parent="pool1" vertex="1">
+                    <mxGeometry y="160" width="2700" height="160" as="geometry"/>
+                </mxCell>
+                <mxCell id="lane1_hdr" value="Step 1&#xa;Parser&#xa;(libpostal)" style="shape=partialRectangle;connectable=0;fillColor=#f5f5f5;top=0;left=0;bottom=0;right=0;fontStyle=1;overflow=hidden;fontSize=11;align=center;strokeColor=#666666;fontColor=#333333;" parent="lane1" vertex="1">
+                    <mxGeometry width="140" height="160" as="geometry"/>
+                </mxCell>
+                <mxCell id="lane1_body" value="" style="shape=partialRectangle;connectable=0;fillColor=none;top=0;left=0;bottom=0;right=0;align=left;spacingLeft=10;overflow=hidden;" parent="lane1" vertex="1">
+                    <mxGeometry x="140" width="2560" height="160" as="geometry"/>
+                </mxCell>
+
+                <!-- Lane 2 — Step 2 Postal Lookup -->
+                <mxCell id="lane2" value="" style="shape=tableRow;horizontal=0;startSize=0;swimlaneHead=0;swimlaneBody=0;fillColor=none;collapsible=0;dropTarget=0;points=[[0,0.5],[1,0.5]];portConstraint=eastwest;fontSize=12;" parent="pool1" vertex="1">
+                    <mxGeometry y="320" width="2700" height="130" as="geometry"/>
+                </mxCell>
+                <mxCell id="lane2_hdr" value="Step 2&#xa;Postal&#xa;Lookup" style="shape=partialRectangle;connectable=0;fillColor=#f5f5f5;top=0;left=0;bottom=0;right=0;fontStyle=1;overflow=hidden;fontSize=11;align=center;strokeColor=#666666;fontColor=#333333;" parent="lane2" vertex="1">
+                    <mxGeometry width="140" height="130" as="geometry"/>
+                </mxCell>
+                <mxCell id="lane2_body" value="" style="shape=partialRectangle;connectable=0;fillColor=none;top=0;left=0;bottom=0;right=0;align=left;spacingLeft=10;overflow=hidden;" parent="lane2" vertex="1">
+                    <mxGeometry x="140" width="2560" height="130" as="geometry"/>
+                </mxCell>
+
+                <!-- Lane 3 — Step 3 Exact Match (tall: mismatch decision + 3 tiers + result decision) -->
+                <mxCell id="lane3" value="" style="shape=tableRow;horizontal=0;startSize=0;swimlaneHead=0;swimlaneBody=0;fillColor=none;collapsible=0;dropTarget=0;points=[[0,0.5],[1,0.5]];portConstraint=eastwest;fontSize=12;" parent="pool1" vertex="1">
+                    <mxGeometry y="450" width="2700" height="350" as="geometry"/>
+                </mxCell>
+                <mxCell id="lane3_hdr" value="Step 3&#xa;Exact&#xa;Match" style="shape=partialRectangle;connectable=0;fillColor=#f5f5f5;top=0;left=0;bottom=0;right=0;fontStyle=1;overflow=hidden;fontSize=11;align=center;strokeColor=#666666;fontColor=#333333;" parent="lane3" vertex="1">
+                    <mxGeometry width="140" height="350" as="geometry"/>
+                </mxCell>
+                <mxCell id="lane3_body" value="" style="shape=partialRectangle;connectable=0;fillColor=none;top=0;left=0;bottom=0;right=0;align=left;spacingLeft=10;overflow=hidden;" parent="lane3" vertex="1">
+                    <mxGeometry x="140" width="2560" height="350" as="geometry"/>
+                </mxCell>
+
+                <!-- Lane 4 — Step 4 Mismatch Detect -->
+                <mxCell id="lane4" value="" style="shape=tableRow;horizontal=0;startSize=0;swimlaneHead=0;swimlaneBody=0;fillColor=none;collapsible=0;dropTarget=0;points=[[0,0.5],[1,0.5]];portConstraint=eastwest;fontSize=12;" parent="pool1" vertex="1">
+                    <mxGeometry y="800" width="2700" height="120" as="geometry"/>
+                </mxCell>
+                <mxCell id="lane4_hdr" value="Step 4&#xa;Mismatch&#xa;Detect" style="shape=partialRectangle;connectable=0;fillColor=#f5f5f5;top=0;left=0;bottom=0;right=0;fontStyle=1;overflow=hidden;fontSize=11;align=center;strokeColor=#666666;fontColor=#333333;" parent="lane4" vertex="1">
+                    <mxGeometry width="140" height="120" as="geometry"/>
+                </mxCell>
+                <mxCell id="lane4_body" value="" style="shape=partialRectangle;connectable=0;fillColor=none;top=0;left=0;bottom=0;right=0;align=left;spacingLeft=10;overflow=hidden;" parent="lane4" vertex="1">
+                    <mxGeometry x="140" width="2560" height="120" as="geometry"/>
+                </mxCell>
+
+                <!-- Lane 5 — Step 5 Scanner -->
+                <mxCell id="lane5" value="" style="shape=tableRow;horizontal=0;startSize=0;swimlaneHead=0;swimlaneBody=0;fillColor=none;collapsible=0;dropTarget=0;points=[[0,0.5],[1,0.5]];portConstraint=eastwest;fontSize=12;" parent="pool1" vertex="1">
+                    <mxGeometry y="920" width="2700" height="180" as="geometry"/>
+                </mxCell>
+                <mxCell id="lane5_hdr" value="Step 5&#xa;Scanner&#xa;(N-gram)" style="shape=partialRectangle;connectable=0;fillColor=#f5f5f5;top=0;left=0;bottom=0;right=0;fontStyle=1;overflow=hidden;fontSize=11;align=center;strokeColor=#666666;fontColor=#333333;" parent="lane5" vertex="1">
+                    <mxGeometry width="140" height="180" as="geometry"/>
+                </mxCell>
+                <mxCell id="lane5_body" value="" style="shape=partialRectangle;connectable=0;fillColor=none;top=0;left=0;bottom=0;right=0;align=left;spacingLeft=10;overflow=hidden;" parent="lane5" vertex="1">
+                    <mxGeometry x="140" width="2560" height="180" as="geometry"/>
+                </mxCell>
+
+                <!-- Lane 6 — Step 6 LLM Agent -->
+                <mxCell id="lane6" value="" style="shape=tableRow;horizontal=0;startSize=0;swimlaneHead=0;swimlaneBody=0;fillColor=none;collapsible=0;dropTarget=0;points=[[0,0.5],[1,0.5]];portConstraint=eastwest;fontSize=12;" parent="pool1" vertex="1">
+                    <mxGeometry y="1100" width="2700" height="120" as="geometry"/>
+                </mxCell>
+                <mxCell id="lane6_hdr" value="Step 6&#xa;LLM Agent&#xa;(≈15%)" style="shape=partialRectangle;connectable=0;fillColor=#fff2cc;top=0;left=0;bottom=0;right=0;fontStyle=1;overflow=hidden;fontSize=11;align=center;strokeColor=#d6b656;fontColor=#333333;" parent="lane6" vertex="1">
+                    <mxGeometry width="140" height="120" as="geometry"/>
+                </mxCell>
+                <mxCell id="lane6_body" value="" style="shape=partialRectangle;connectable=0;fillColor=none;top=0;left=0;bottom=0;right=0;align=left;spacingLeft=10;overflow=hidden;" parent="lane6" vertex="1">
+                    <mxGeometry x="140" width="2560" height="120" as="geometry"/>
+                </mxCell>
+
+                <!-- Lane 7 — Step 7 Revalidate -->
+                <mxCell id="lane7" value="" style="shape=tableRow;horizontal=0;startSize=0;swimlaneHead=0;swimlaneBody=0;fillColor=none;collapsible=0;dropTarget=0;points=[[0,0.5],[1,0.5]];portConstraint=eastwest;fontSize=12;" parent="pool1" vertex="1">
+                    <mxGeometry y="1220" width="2700" height="120" as="geometry"/>
+                </mxCell>
+                <mxCell id="lane7_hdr" value="Step 7&#xa;Revalidate&#xa;(LLM only)" style="shape=partialRectangle;connectable=0;fillColor=#fff2cc;top=0;left=0;bottom=0;right=0;fontStyle=1;overflow=hidden;fontSize=11;align=center;strokeColor=#d6b656;fontColor=#333333;" parent="lane7" vertex="1">
+                    <mxGeometry width="140" height="120" as="geometry"/>
+                </mxCell>
+                <mxCell id="lane7_body" value="" style="shape=partialRectangle;connectable=0;fillColor=none;top=0;left=0;bottom=0;right=0;align=left;spacingLeft=10;overflow=hidden;" parent="lane7" vertex="1">
+                    <mxGeometry x="140" width="2560" height="120" as="geometry"/>
+                </mxCell>
+
+                <!-- Lane 8 — Step 8 Persist -->
+                <mxCell id="lane8" value="" style="shape=tableRow;horizontal=0;startSize=0;swimlaneHead=0;swimlaneBody=0;fillColor=none;collapsible=0;dropTarget=0;points=[[0,0.5],[1,0.5]];portConstraint=eastwest;fontSize=12;" parent="pool1" vertex="1">
+                    <mxGeometry y="1340" width="2700" height="120" as="geometry"/>
+                </mxCell>
+                <mxCell id="lane8_hdr" value="Step 8&#xa;Persist" style="shape=partialRectangle;connectable=0;fillColor=#f5f5f5;top=0;left=0;bottom=0;right=0;fontStyle=1;overflow=hidden;fontSize=11;align=center;strokeColor=#666666;fontColor=#333333;" parent="lane8" vertex="1">
+                    <mxGeometry width="140" height="120" as="geometry"/>
+                </mxCell>
+                <mxCell id="lane8_body" value="" style="shape=partialRectangle;connectable=0;fillColor=none;top=0;left=0;bottom=0;right=0;align=left;spacingLeft=10;overflow=hidden;" parent="lane8" vertex="1">
+                    <mxGeometry x="140" width="2560" height="120" as="geometry"/>
+                </mxCell>
+
+                <!-- Lane Flows — Summary -->
+                <mxCell id="lane_flows" value="" style="shape=tableRow;horizontal=0;startSize=0;swimlaneHead=0;swimlaneBody=0;fillColor=none;collapsible=0;dropTarget=0;points=[[0,0.5],[1,0.5]];portConstraint=eastwest;fontSize=12;" parent="pool1" vertex="1">
+                    <mxGeometry y="1460" width="2700" height="280" as="geometry"/>
+                </mxCell>
+                <mxCell id="lane_flows_hdr" value="FLOWS&#xa;Summary" style="shape=partialRectangle;connectable=0;fillColor=#e1d5e7;top=0;left=0;bottom=0;right=0;fontStyle=1;overflow=hidden;fontSize=11;align=center;strokeColor=#9673a6;fontColor=#333333;" parent="lane_flows" vertex="1">
+                    <mxGeometry width="140" height="280" as="geometry"/>
+                </mxCell>
+                <mxCell id="lane_flows_body" value="" style="shape=partialRectangle;connectable=0;fillColor=none;top=0;left=0;bottom=0;right=0;align=left;spacingLeft=10;overflow=hidden;" parent="lane_flows" vertex="1">
+                    <mxGeometry x="140" width="2560" height="280" as="geometry"/>
+                </mxCell>
+
+                <!-- ════════════════════════════════════════════════════════════
+                     STEP 0 — Preprocess
+                     ════════════════════════════════════════════════════════════ -->
+                <mxCell id="s0_task" value="Concat address lines&#xa;NFKC + casefold&#xa;whitespace collapse" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=11;fontStyle=0;align=center;" parent="1" vertex="1">
+                    <mxGeometry x="280" y="90" width="200" height="60" as="geometry"/>
+                </mxCell>
+                <mxCell id="s0_out" value="raw_address&#xa;normalized" style="text;html=1;align=left;verticalAlign=middle;resizable=0;points=[];autosize=1;strokeColor=none;fillColor=none;fontSize=10;fontColor=#666666;" parent="1" vertex="1">
+                    <mxGeometry x="500" y="95" width="90" height="50" as="geometry"/>
+                </mxCell>
+
+                <!-- ════════════════════════════════════════════════════════════
+                     STEP 1 — Parser + mismatch_detected decision diamond
+                     ════════════════════════════════════════════════════════════ -->
+                <mxCell id="s1_task" value="libpostal parse&#xa;+ country detect" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=11;fontStyle=0;align=center;" parent="1" vertex="1">
+                    <mxGeometry x="280" y="215" width="200" height="55" as="geometry"/>
+                </mxCell>
+                <mxCell id="s1_out" value="town, street, building&#xa;postal_code, candidates" style="text;html=1;align=left;verticalAlign=middle;resizable=0;points=[];autosize=1;strokeColor=none;fillColor=none;fontSize=10;fontColor=#666666;" parent="1" vertex="1">
+                    <mxGeometry x="500" y="215" width="150" height="40" as="geometry"/>
+                </mxCell>
+
+                <!-- Step 1: mismatch_detected? decision diamond -->
+                <mxCell id="s1_mismatch_dec" value="country in&#xa;address ≠&#xa;country_code?" style="rhombus;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=10;fontStyle=1;" parent="1" vertex="1">
+                    <mxGeometry x="560" y="205" width="120" height="80" as="geometry"/>
+                </mxCell>
+                <mxCell id="s1_mm_yes" value="YES" style="text;html=1;align=center;verticalAlign=middle;resizable=0;points=[];autosize=1;strokeColor=none;fillColor=none;fontSize=10;fontStyle=1;fontColor=#CC0000;" parent="1" vertex="1">
+                    <mxGeometry x="690" y="220" width="40" height="30" as="geometry"/>
+                </mxCell>
+                <mxCell id="s1_mm_writes" value="mismatch_detected = True&#xa;suggested_country_code = XX" style="text;html=1;align=left;verticalAlign=middle;resizable=0;points=[];autosize=1;strokeColor=none;fillColor=none;fontSize=10;fontColor=#CC0000;fontStyle=2;" parent="1" vertex="1">
+                    <mxGeometry x="730" y="215" width="190" height="40" as="geometry"/>
+                </mxCell>
+                <mxCell id="s1_mm_no" value="NO" style="text;html=1;align=center;verticalAlign=middle;resizable=0;points=[];autosize=1;strokeColor=none;fillColor=none;fontSize=10;fontStyle=1;fontColor=#007333;" parent="1" vertex="1">
+                    <mxGeometry x="595" y="290" width="40" height="30" as="geometry"/>
+                </mxCell>
+                <mxCell id="s1_mm_no_writes" value="mismatch_detected = False" style="text;html=1;align=left;verticalAlign=middle;resizable=0;points=[];autosize=1;strokeColor=none;fillColor=none;fontSize=10;fontColor=#007333;fontStyle=2;" parent="1" vertex="1">
+                    <mxGeometry x="640" y="290" width="160" height="30" as="geometry"/>
+                </mxCell>
+
+                <!-- Arrow: s1_task → s1_mismatch_dec -->
+                <mxCell id="arr_s1_to_dec" style="edgeStyle=orthogonalEdgeStyle;rounded=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;strokeWidth=2;strokeColor=#333333;" parent="1" source="s1_task" target="s1_mismatch_dec" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+
+                <!-- ════════════════════════════════════════════════════════════
+                     STEP 2 — 3-tier Postal Lookup
+                     ════════════════════════════════════════════════════════════ -->
+                <mxCell id="s2_task" value="3-tier postal lookup&#xa;T1: cc + postal&#xa;T2: suggested_cc + postal&#xa;T3: postal-only" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=11;fontStyle=0;align=center;" parent="1" vertex="1">
+                    <mxGeometry x="280" y="375" width="200" height="70" as="geometry"/>
+                </mxCell>
+                <mxCell id="s2_out" value="postal_region&#xa;admin1_code&#xa;city_hint" style="text;html=1;align=left;verticalAlign=middle;resizable=0;points=[];autosize=1;strokeColor=none;fillColor=none;fontSize=10;fontColor=#666666;" parent="1" vertex="1">
+                    <mxGeometry x="500" y="375" width="90" height="60" as="geometry"/>
+                </mxCell>
+
+                <!-- ════════════════════════════════════════════════════════════
+                     STEP 3 — Exact Match  (expanded: mismatch diamond → 3 tiers → result decision)
+                     ════════════════════════════════════════════════════════════ -->
+
+                <!-- Step 3: Entry — mismatch_detected? decision (select CC order) -->
+                <mxCell id="s3_mm_dec" value="mismatch&#xa;detected?" style="rhombus;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=10;fontStyle=1;" parent="1" vertex="1">
+                    <mxGeometry x="230" y="500" width="110" height="70" as="geometry"/>
+                </mxCell>
+                <mxCell id="s3_mm_yes_label" value="YES → try suggested_cc FIRST" style="text;html=1;align=left;verticalAlign=middle;resizable=0;points=[];autosize=1;strokeColor=none;fillColor=none;fontSize=9;fontStyle=1;fontColor=#CC0000;" parent="1" vertex="1">
+                    <mxGeometry x="350" y="495" width="180" height="25" as="geometry"/>
+                </mxCell>
+                <mxCell id="s3_mm_no_label" value="NO → use country_code only" style="text;html=1;align=left;verticalAlign=middle;resizable=0;points=[];autosize=1;strokeColor=none;fillColor=none;fontSize=9;fontStyle=1;fontColor=#007333;" parent="1" vertex="1">
+                    <mxGeometry x="350" y="550" width="170" height="25" as="geometry"/>
+                </mxCell>
+                <!-- Arrow: mismatch YES -->
+                <mxCell id="arr_s3mm_yes" style="edgeStyle=orthogonalEdgeStyle;rounded=1;exitX=1;exitY=0.25;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;strokeWidth=1;strokeColor=#CC0000;dashed=1;" parent="1" source="s3_mm_dec" target="s3_tier1" edge="1">
+                    <mxGeometry relative="1" as="geometry">
+                        <Array as="points">
+                            <mxPoint x="370" y="515"/>
+                            <mxPoint x="370" y="590"/>
+                            <mxPoint x="520" y="590"/>
+                        </Array>
+                    </mxGeometry>
+                </mxCell>
+                <!-- Arrow: mismatch NO -->
+                <mxCell id="arr_s3mm_no" style="edgeStyle=orthogonalEdgeStyle;rounded=1;exitX=1;exitY=0.75;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;strokeWidth=1;strokeColor=#007333;dashed=1;" parent="1" source="s3_mm_dec" target="s3_tier1" edge="1">
+                    <mxGeometry relative="1" as="geometry">
+                        <Array as="points">
+                            <mxPoint x="390" y="555"/>
+                            <mxPoint x="390" y="620"/>
+                            <mxPoint x="520" y="620"/>
+                        </Array>
+                    </mxGeometry>
+                </mxCell>
+
+                <!-- Step 3 Tier 1: libpostal_town lookup -->
+                <mxCell id="s3_tier1" value="Tier 1: libpostal_town&#xa;GeoNames exact lookup&#xa;(country-scoped)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=10;fontStyle=0;align=center;" parent="1" vertex="1">
+                    <mxGeometry x="520" y="575" width="190" height="55" as="geometry"/>
+                </mxCell>
+
+                <!-- Step 3 Tier 2: city_candidates lookup -->
+                <mxCell id="s3_tier2" value="Tier 2: city_candidates&#xa;GeoNames exact lookup&#xa;(each candidate)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=10;fontStyle=0;align=center;" parent="1" vertex="1">
+                    <mxGeometry x="520" y="645" width="190" height="55" as="geometry"/>
+                </mxCell>
+
+                <!-- Step 3 Tier 3: postal_town_candidate lookup -->
+                <mxCell id="s3_tier3" value="Tier 3: postal_town_candidate&#xa;GeoNames exact lookup&#xa;(last-resort fallback)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=10;fontStyle=0;align=center;" parent="1" vertex="1">
+                    <mxGeometry x="520" y="715" width="190" height="55" as="geometry"/>
+                </mxCell>
+
+                <!-- Arrow: Tier 1 → Tier 2 (no match → try next) -->
+                <mxCell id="arr_t1_t2" value="no match" style="edgeStyle=orthogonalEdgeStyle;rounded=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;strokeWidth=1;strokeColor=#999999;fontSize=9;fontColor=#999999;" parent="1" source="s3_tier1" target="s3_tier2" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+
+                <!-- Arrow: Tier 2 → Tier 3 (no match → try next) -->
+                <mxCell id="arr_t2_t3" value="no match" style="edgeStyle=orthogonalEdgeStyle;rounded=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;strokeWidth=1;strokeColor=#999999;fontSize=9;fontColor=#999999;" parent="1" source="s3_tier2" target="s3_tier3" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+
+                <!-- Step 3 Disambiguate box -->
+                <mxCell id="s3_disambig" value="Disambiguate&#xa;(admin1, region,&#xa;population)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=10;fontStyle=0;align=center;" parent="1" vertex="1">
+                    <mxGeometry x="780" y="625" width="140" height="55" as="geometry"/>
+                </mxCell>
+
+                <!-- Arrows: each tier → disambiguate on match -->
+                <mxCell id="arr_t1_dis" value="match" style="edgeStyle=orthogonalEdgeStyle;rounded=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.2;entryDx=0;entryDy=0;strokeWidth=1;strokeColor=#007333;fontSize=9;fontColor=#007333;" parent="1" source="s3_tier1" target="s3_disambig" edge="1">
+                    <mxGeometry relative="1" as="geometry">
+                        <Array as="points">
+                            <mxPoint x="740" y="603"/>
+                            <mxPoint x="740" y="636"/>
+                        </Array>
+                    </mxGeometry>
+                </mxCell>
+                <mxCell id="arr_t2_dis" value="match" style="edgeStyle=orthogonalEdgeStyle;rounded=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;strokeWidth=1;strokeColor=#007333;fontSize=9;fontColor=#007333;" parent="1" source="s3_tier2" target="s3_disambig" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="arr_t3_dis" value="match" style="edgeStyle=orthogonalEdgeStyle;rounded=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.8;entryDx=0;entryDy=0;strokeWidth=1;strokeColor=#007333;fontSize=9;fontColor=#007333;" parent="1" source="s3_tier3" target="s3_disambig" edge="1">
+                    <mxGeometry relative="1" as="geometry">
+                        <Array as="points">
+                            <mxPoint x="740" y="743"/>
+                            <mxPoint x="740" y="669"/>
+                        </Array>
+                    </mxGeometry>
+                </mxCell>
+
+                <!-- Step 3: Result decision diamond — exact match? -->
+                <mxCell id="s3_decision" value="exact&#xa;match?" style="rhombus;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=11;fontStyle=1;" parent="1" vertex="1">
+                    <mxGeometry x="990" y="615" width="100" height="80" as="geometry"/>
+                </mxCell>
+                <!-- Arrow: disambiguate → decision -->
+                <mxCell id="arr_dis_dec" style="edgeStyle=orthogonalEdgeStyle;rounded=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;strokeWidth=2;strokeColor=#333333;" parent="1" source="s3_disambig" target="s3_decision" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+
+                <mxCell id="s3_yes_label" value="YES&#xa;conf ≥ 0.95" style="text;html=1;align=center;verticalAlign=middle;resizable=0;points=[];autosize=1;strokeColor=none;fillColor=none;fontSize=10;fontStyle=1;fontColor=#007333;" parent="1" vertex="1">
+                    <mxGeometry x="1100" y="615" width="80" height="50" as="geometry"/>
+                </mxCell>
+                <mxCell id="s3_no_label" value="NO" style="text;html=1;align=center;verticalAlign=middle;resizable=0;points=[];autosize=1;strokeColor=none;fillColor=none;fontSize=10;fontStyle=1;fontColor=#CC0000;" parent="1" vertex="1">
+                    <mxGeometry x="1020" y="700" width="40" height="30" as="geometry"/>
+                </mxCell>
+
+                <!-- Step 3: Tier 3 no match → feeds into decision NO path too -->
+                <mxCell id="arr_t3_nomatch" style="edgeStyle=orthogonalEdgeStyle;rounded=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=1;entryDx=0;entryDy=0;strokeWidth=1;strokeColor=#CC0000;dashed=1;fontSize=9;" parent="1" source="s3_tier3" target="s3_decision" edge="1">
+                    <mxGeometry relative="1" as="geometry">
+                        <Array as="points">
+                            <mxPoint x="615" y="785"/>
+                            <mxPoint x="1040" y="785"/>
+                        </Array>
+                    </mxGeometry>
+                </mxCell>
+                <mxCell id="s3_allnomatch" value="all tiers fail" style="text;html=1;align=center;verticalAlign=middle;resizable=0;points=[];autosize=1;strokeColor=none;fillColor=none;fontSize=9;fontColor=#CC0000;" parent="1" vertex="1">
+                    <mxGeometry x="770" y="775" width="80" height="25" as="geometry"/>
+                </mxCell>
+
+                <!-- ════════════════════════════════════════════════════════════
+                     STEP 4 — Mismatch Detect
+                     ════════════════════════════════════════════════════════════ -->
+                <mxCell id="s4_task" value="Cross-country&#xa;city-name check" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=11;fontStyle=0;align=center;" parent="1" vertex="1">
+                    <mxGeometry x="280" y="870" width="200" height="60" as="geometry"/>
+                </mxCell>
+                <mxCell id="s4_out" value="mismatch_detected&#xa;suggested_country_code" style="text;html=1;align=left;verticalAlign=middle;resizable=0;points=[];autosize=1;strokeColor=none;fillColor=none;fontSize=10;fontColor=#666666;" parent="1" vertex="1">
+                    <mxGeometry x="500" y="875" width="150" height="50" as="geometry"/>
+                </mxCell>
+
+                <!-- ════════════════════════════════════════════════════════════
+                     STEP 5 — Scanner  (with mismatch decision)
+                     ════════════════════════════════════════════════════════════ -->
+
+                <!-- Step 5: mismatch_detected? decision at entry -->
+                <mxCell id="s5_mm_dec" value="mismatch&#xa;detected?" style="rhombus;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=10;fontStyle=1;" parent="1" vertex="1">
+                    <mxGeometry x="230" y="985" width="110" height="70" as="geometry"/>
+                </mxCell>
+                <mxCell id="s5_mm_yes_label" value="YES → suggested_cc FIRST" style="text;html=1;align=left;verticalAlign=middle;resizable=0;points=[];autosize=1;strokeColor=none;fillColor=none;fontSize=9;fontStyle=1;fontColor=#CC0000;" parent="1" vertex="1">
+                    <mxGeometry x="350" y="980" width="160" height="25" as="geometry"/>
+                </mxCell>
+                <mxCell id="s5_mm_no_label" value="NO → country_code only" style="text;html=1;align=left;verticalAlign=middle;resizable=0;points=[];autosize=1;strokeColor=none;fillColor=none;fontSize=9;fontStyle=1;fontColor=#007333;" parent="1" vertex="1">
+                    <mxGeometry x="350" y="1035" width="150" height="25" as="geometry"/>
+                </mxCell>
+
+                <!-- Step 5: scan task box -->
+                <mxCell id="s5_task" value="N-gram tokenize raw_address&#xa;Phase 1: exact n-gram match&#xa;Phase 2: fuzzy (rapidfuzz ≥92)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=10;fontStyle=0;align=center;" parent="1" vertex="1">
+                    <mxGeometry x="520" y="985" width="210" height="60" as="geometry"/>
+                </mxCell>
+                <!-- Arrow: mismatch dec → scan task -->
+                <mxCell id="arr_s5mm_task" style="edgeStyle=orthogonalEdgeStyle;rounded=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;strokeWidth=2;strokeColor=#333333;" parent="1" source="s5_mm_dec" target="s5_task" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+
+                <!-- Step 5: scan_match? decision diamond -->
+                <mxCell id="s5_decision" value="scan&#xa;match?" style="rhombus;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=11;fontStyle=1;" parent="1" vertex="1">
+                    <mxGeometry x="800" y="980" width="100" height="80" as="geometry"/>
+                </mxCell>
+                <mxCell id="arr_s5_task_dec" style="edgeStyle=orthogonalEdgeStyle;rounded=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;strokeWidth=2;strokeColor=#333333;" parent="1" source="s5_task" target="s5_decision" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+
+                <mxCell id="s5_yes_label" value="YES&#xa;conf = 0.80" style="text;html=1;align=center;verticalAlign=middle;resizable=0;points=[];autosize=1;strokeColor=none;fillColor=none;fontSize=10;fontStyle=1;fontColor=#007333;" parent="1" vertex="1">
+                    <mxGeometry x="910" y="980" width="80" height="50" as="geometry"/>
+                </mxCell>
+                <mxCell id="s5_no_label" value="NO" style="text;html=1;align=center;verticalAlign=middle;resizable=0;points=[];autosize=1;strokeColor=none;fillColor=none;fontSize=10;fontStyle=1;fontColor=#CC0000;" parent="1" vertex="1">
+                    <mxGeometry x="830" y="1065" width="40" height="30" as="geometry"/>
+                </mxCell>
+
+                <!-- ════════════════════════════════════════════════════════════
+                     STEP 6 — LLM Agent
+                     ════════════════════════════════════════════════════════════ -->
+                <mxCell id="s6_task" value="LLM Agent&#xa;5 GeoNames tools&#xa;max 5 tool calls" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=11;fontStyle=0;align=center;" parent="1" vertex="1">
+                    <mxGeometry x="280" y="1155" width="200" height="60" as="geometry"/>
+                </mxCell>
+                <mxCell id="s6_out" value="llm_result&#xa;(town, street, etc.)" style="text;html=1;align=left;verticalAlign=middle;resizable=0;points=[];autosize=1;strokeColor=none;fillColor=none;fontSize=10;fontColor=#666666;" parent="1" vertex="1">
+                    <mxGeometry x="500" y="1160" width="130" height="50" as="geometry"/>
+                </mxCell>
+
+                <!-- ════════════════════════════════════════════════════════════
+                     STEP 7 — Revalidate
+                     ════════════════════════════════════════════════════════════ -->
+                <mxCell id="s7_task" value="GeoNames re-check&#xa;exact + fuzzy match&#xa;hallucination prevention" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=11;fontStyle=0;align=center;" parent="1" vertex="1">
+                    <mxGeometry x="280" y="1275" width="200" height="60" as="geometry"/>
+                </mxCell>
+                <mxCell id="s7_out" value="status&#xa;confidence" style="text;html=1;align=left;verticalAlign=middle;resizable=0;points=[];autosize=1;strokeColor=none;fillColor=none;fontSize=10;fontColor=#666666;" parent="1" vertex="1">
+                    <mxGeometry x="500" y="1280" width="80" height="50" as="geometry"/>
+                </mxCell>
+
+                <!-- ════════════════════════════════════════════════════════════
+                     STEP 8 — Persist
+                     ════════════════════════════════════════════════════════════ -->
+                <mxCell id="s8_task" value="Assemble final_result&#xa;Map status, round confidence&#xa;Join warnings&#xa;Write: Cloud SQL + GCS + review queue" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=11;fontStyle=0;align=center;" parent="1" vertex="1">
+                    <mxGeometry x="280" y="1395" width="280" height="70" as="geometry"/>
+                </mxCell>
+                <mxCell id="s8_end" value="final_result" style="shape=doubleArrow;whiteSpace=wrap;html=0;fillColor=#f8cecc;strokeColor=#b85450;fontSize=12;fontStyle=1;direction=south;" parent="1" vertex="1">
+                    <mxGeometry x="380" y="1475" width="80" height="40" as="geometry"/>
+                </mxCell>
+
+                <!-- ════════════════════════════════════════════════════════════
+                     ARROWS  (main pipeline flow)
+                     ════════════════════════════════════════════════════════════ -->
+
+                <!-- Step 0 → Step 1 -->
+                <mxCell id="arr_0_1" style="edgeStyle=orthogonalEdgeStyle;rounded=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;strokeWidth=2;strokeColor=#333333;" parent="1" source="s0_task" target="s1_task" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+
+                <!-- Step 1 → Step 2 -->
+                <mxCell id="arr_1_2" style="edgeStyle=orthogonalEdgeStyle;rounded=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;strokeWidth=2;strokeColor=#333333;" parent="1" source="s1_task" target="s2_task" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+
+                <!-- Step 2 → Step 3 mismatch decision -->
+                <mxCell id="arr_2_3" style="edgeStyle=orthogonalEdgeStyle;rounded=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;strokeWidth=2;strokeColor=#333333;" parent="1" source="s2_task" target="s3_mm_dec" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+
+                <!-- Step 3 decision YES → Step 8 (Flow 1 bypass) -->
+                <mxCell id="arr_3_yes" style="edgeStyle=orthogonalEdgeStyle;rounded=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=1;entryY=0.5;entryDx=0;entryDy=0;strokeWidth=3;strokeColor=#007333;dashed=0;" parent="1" source="s3_decision" target="s8_task" edge="1">
+                    <mxGeometry relative="1" as="geometry">
+                        <Array as="points">
+                            <mxPoint x="1200" y="655"/>
+                            <mxPoint x="1200" y="1430"/>
+                        </Array>
+                    </mxGeometry>
+                </mxCell>
+                <mxCell id="flow1_tag" value="Flow 1" style="text;html=1;align=center;verticalAlign=middle;resizable=0;points=[];autosize=1;strokeColor=none;fillColor=none;fontSize=11;fontStyle=1;fontColor=#007333;" parent="1" vertex="1">
+                    <mxGeometry x="1205" y="1050" width="60" height="30" as="geometry"/>
+                </mxCell>
+
+                <!-- Step 3 decision NO → Step 4 -->
+                <mxCell id="arr_3_no" style="edgeStyle=orthogonalEdgeStyle;rounded=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=1;entryY=0.5;entryDx=0;entryDy=0;strokeWidth=2;strokeColor=#CC0000;" parent="1" source="s3_decision" target="s4_task" edge="1">
+                    <mxGeometry relative="1" as="geometry">
+                        <Array as="points">
+                            <mxPoint x="1040" y="810"/>
+                            <mxPoint x="1040" y="900"/>
+                        </Array>
+                    </mxGeometry>
+                </mxCell>
+
+                <!-- Step 4 → Step 5 mismatch decision -->
+                <mxCell id="arr_4_5" style="edgeStyle=orthogonalEdgeStyle;rounded=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;strokeWidth=2;strokeColor=#333333;" parent="1" source="s4_task" target="s5_mm_dec" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+
+                <!-- Step 5 decision YES → Step 8 (Flow 2 bypass) -->
+                <mxCell id="arr_5_yes" style="edgeStyle=orthogonalEdgeStyle;rounded=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=1;entryY=0.3;entryDx=0;entryDy=0;strokeWidth=3;strokeColor=#0000CC;dashed=0;" parent="1" source="s5_decision" target="s8_task" edge="1">
+                    <mxGeometry relative="1" as="geometry">
+                        <Array as="points">
+                            <mxPoint x="1150" y="1020"/>
+                            <mxPoint x="1150" y="1416"/>
+                        </Array>
+                    </mxGeometry>
+                </mxCell>
+                <mxCell id="flow2_tag" value="Flow 2" style="text;html=1;align=center;verticalAlign=middle;resizable=0;points=[];autosize=1;strokeColor=none;fillColor=none;fontSize=11;fontStyle=1;fontColor=#0000CC;" parent="1" vertex="1">
+                    <mxGeometry x="1155" y="1200" width="60" height="30" as="geometry"/>
+                </mxCell>
+
+                <!-- Step 5 decision NO → Step 6 -->
+                <mxCell id="arr_5_no" style="edgeStyle=orthogonalEdgeStyle;rounded=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=1;entryY=0.5;entryDx=0;entryDy=0;strokeWidth=2;strokeColor=#CC0000;" parent="1" source="s5_decision" target="s6_task" edge="1">
+                    <mxGeometry relative="1" as="geometry">
+                        <Array as="points">
+                            <mxPoint x="850" y="1100"/>
+                            <mxPoint x="850" y="1185"/>
+                        </Array>
+                    </mxGeometry>
+                </mxCell>
+
+                <!-- Step 6 → Step 7 -->
+                <mxCell id="arr_6_7" style="edgeStyle=orthogonalEdgeStyle;rounded=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;strokeWidth=2;strokeColor=#B85450;" parent="1" source="s6_task" target="s7_task" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="flow3_tag" value="Flow 3" style="text;html=1;align=center;verticalAlign=middle;resizable=0;points=[];autosize=1;strokeColor=none;fillColor=none;fontSize=11;fontStyle=1;fontColor=#B85450;" parent="1" vertex="1">
+                    <mxGeometry x="200" y="1220" width="60" height="30" as="geometry"/>
+                </mxCell>
+
+                <!-- Step 7 → Step 8 -->
+                <mxCell id="arr_7_8" style="edgeStyle=orthogonalEdgeStyle;rounded=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;strokeWidth=2;strokeColor=#B85450;" parent="1" source="s7_task" target="s8_task" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+
+                <!-- ════════════════════════════════════════════════════════════
+                     FLOW SUMMARY bars
+                     ════════════════════════════════════════════════════════════ -->
+                <mxCell id="flow1_bar" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=10;opacity=80;" parent="1" vertex="1">
+                    <mxGeometry x="200" y="1520" width="700" height="30" as="geometry"/>
+                </mxCell>
+                <mxCell id="flow1_label" value="Flow 1:  Step 0 → 1 → 2 → 3 ══════════════════════════════════════════════► 8    (exact match, conf ≥ 0.95)" style="text;html=1;align=left;verticalAlign=middle;resizable=0;points=[];autosize=1;strokeColor=none;fillColor=none;fontSize=11;fontStyle=1;fontColor=#007333;" parent="1" vertex="1">
+                    <mxGeometry x="210" y="1520" width="680" height="30" as="geometry"/>
+                </mxCell>
+                <mxCell id="flow2_bar" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=10;opacity=80;" parent="1" vertex="1">
+                    <mxGeometry x="200" y="1570" width="900" height="30" as="geometry"/>
+                </mxCell>
+                <mxCell id="flow2_label" value="Flow 2:  Step 0 → 1 → 2 → 3 → 4 → 5 ═══════════════════════════════════► 8    (scanner, conf = 0.80)" style="text;html=1;align=left;verticalAlign=middle;resizable=0;points=[];autosize=1;strokeColor=none;fillColor=none;fontSize=11;fontStyle=1;fontColor=#0000CC;" parent="1" vertex="1">
+                    <mxGeometry x="210" y="1570" width="680" height="30" as="geometry"/>
+                </mxCell>
+                <mxCell id="flow3_bar" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=10;opacity=80;" parent="1" vertex="1">
+                    <mxGeometry x="200" y="1620" width="1100" height="30" as="geometry"/>
+                </mxCell>
+                <mxCell id="flow3_label" value="Flow 3:  Step 0 → 1 → 2 → 3 → 4 → 5 → 6 → 7 ════════════════════════► 8    (LLM fallback, ≈15% of rows)" style="text;html=1;align=left;verticalAlign=middle;resizable=0;points=[];autosize=1;strokeColor=none;fillColor=none;fontSize=11;fontStyle=1;fontColor=#B85450;" parent="1" vertex="1">
+                    <mxGeometry x="210" y="1620" width="680" height="30" as="geometry"/>
+                </mxCell>
+
+                <!-- ════════════════════════════════════════════════════════════
+                     LEGEND
+                     ════════════════════════════════════════════════════════════ -->
+                <mxCell id="legend_title" value="Legend" style="text;html=1;align=left;verticalAlign=middle;resizable=0;points=[];autosize=1;strokeColor=none;fillColor=none;fontSize=12;fontStyle=5;" parent="1" vertex="1">
+                    <mxGeometry x="200" y="1670" width="60" height="30" as="geometry"/>
+                </mxCell>
+                <mxCell id="legend_green" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=10;" parent="1" vertex="1">
+                    <mxGeometry x="280" y="1675" width="20" height="20" as="geometry"/>
+                </mxCell>
+                <mxCell id="legend_green_text" value="Deterministic step" style="text;html=1;align=left;verticalAlign=middle;resizable=0;points=[];autosize=1;strokeColor=none;fillColor=none;fontSize=10;" parent="1" vertex="1">
+                    <mxGeometry x="305" y="1670" width="120" height="30" as="geometry"/>
+                </mxCell>
+                <mxCell id="legend_yellow" value="" style="rhombus;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=10;" parent="1" vertex="1">
+                    <mxGeometry x="440" y="1673" width="24" height="24" as="geometry"/>
+                </mxCell>
+                <mxCell id="legend_yellow_text" value="Decision point" style="text;html=1;align=left;verticalAlign=middle;resizable=0;points=[];autosize=1;strokeColor=none;fillColor=none;fontSize=10;" parent="1" vertex="1">
+                    <mxGeometry x="470" y="1670" width="100" height="30" as="geometry"/>
+                </mxCell>
+                <mxCell id="legend_llm" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=10;" parent="1" vertex="1">
+                    <mxGeometry x="590" y="1675" width="20" height="20" as="geometry"/>
+                </mxCell>
+                <mxCell id="legend_llm_text" value="LLM-dependent step" style="text;html=1;align=left;verticalAlign=middle;resizable=0;points=[];autosize=1;strokeColor=none;fillColor=none;fontSize=10;" parent="1" vertex="1">
+                    <mxGeometry x="615" y="1670" width="130" height="30" as="geometry"/>
+                </mxCell>
+                <mxCell id="legend_purple" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=10;" parent="1" vertex="1">
+                    <mxGeometry x="760" y="1675" width="20" height="20" as="geometry"/>
+                </mxCell>
+                <mxCell id="legend_purple_text" value="Disambiguation" style="text;html=1;align=left;verticalAlign=middle;resizable=0;points=[];autosize=1;strokeColor=none;fillColor=none;fontSize=10;" parent="1" vertex="1">
+                    <mxGeometry x="785" y="1670" width="100" height="30" as="geometry"/>
+                </mxCell>
+                <mxCell id="legend_dashed" value="--- ---" style="text;html=1;align=left;verticalAlign=middle;resizable=0;points=[];autosize=1;strokeColor=none;fillColor=none;fontSize=10;fontColor=#CC0000;" parent="1" vertex="1">
+                    <mxGeometry x="900" y="1670" width="60" height="30" as="geometry"/>
+                </mxCell>
+                <mxCell id="legend_dashed_text" value="Mismatch-driven path" style="text;html=1;align=left;verticalAlign=middle;resizable=0;points=[];autosize=1;strokeColor=none;fillColor=none;fontSize=10;" parent="1" vertex="1">
+                    <mxGeometry x="960" y="1670" width="130" height="30" as="geometry"/>
+                </mxCell>
+            </root>
+        </mxGraphModel>
+    </diagram>
+</mxfile>

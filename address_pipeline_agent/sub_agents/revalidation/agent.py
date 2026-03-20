@@ -2,7 +2,9 @@
 RevalidationAgent — Step 7.
 
 A CustomAgent that re-validates the resolved town against GeoNames.
-Runs for ALL rows (both deterministic and LLM paths) as a safety net.
+Runs only for LLM-path rows (status != "resolved" after deterministic steps).
+Deterministic paths (Flow 1 / Flow 2) skip this step entirely — their
+confidence is set by DeterministicResolverAgent.
 """
 
 from __future__ import annotations

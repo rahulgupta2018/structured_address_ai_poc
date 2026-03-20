@@ -45,6 +45,7 @@ from services.geonames_repo import (
 from utils.config import (
     LLM_CONCURRENCY,
     LLM_MAX_TOKENS,
+    LLM_MAX_TURNS,
     LLM_MODEL,
     LLM_TEMPERATURE,
     LLM_TIMEOUT_SECONDS,
@@ -53,8 +54,7 @@ from utils.schemas import LlmAddressOutput
 
 logger = logging.getLogger(__name__)
 
-# Maximum LLM round-trips (tool calls + final answer)
-_MAX_TURNS = 8
+
 
 # ── LLM concurrency limiter ──────────────────────────────────────────────────
 # Limits how many concurrent LLM calls are in-flight to match Ollama's
@@ -284,7 +284,7 @@ class LlmAddressParserAgent(BaseAgent):
         # so that only LLM_CONCURRENCY calls are in-flight at once.
         sem = _get_llm_semaphore()
         async with sem:
-          for turn in range(_MAX_TURNS):
+          for turn in range(LLM_MAX_TURNS):
             try:
                 response = await litellm.acompletion(
                     model=LLM_MODEL,
@@ -418,7 +418,7 @@ class LlmAddressParserAgent(BaseAgent):
                 ri, result_dict.get("town"), result_dict.get("confidence", 0),
             )
         else:
-            logger.warning("Row %s: LLM produced no usable result after %d turns", ri, _MAX_TURNS)
+            logger.warning("Row %s: LLM produced no usable result after %d turns", ri, LLM_MAX_TURNS)
             state["llm_result"] = None
 
         # Store LLM usage stats in session state for downstream reporting

@@ -7,6 +7,8 @@ pydantic>=2.5.0
 google-adk>=1.0.0
 litellm>=1.30.0
 
+python-dotenv>=1.0.0
+
 # ── Address parsing ─────────────────────────────────────────────────────────
 postal                  # libpostal Python bindings (requires libpostal C lib)
 

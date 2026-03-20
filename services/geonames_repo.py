@@ -178,6 +178,37 @@ def query_postal_code(postal_code: str, country_code: str) -> list[dict]:
     return _rows_to_dicts(cursor)
 
 
+def query_postal_code_any_country(postal_code: str) -> list[dict]:
+    """Look up places associated with a postal code across ALL countries.
+
+    Used as a fallback when the primary postal+country lookup returns
+    nothing (e.g. the input country_code is wrong).
+
+    Args:
+        postal_code: The postal/ZIP code string.
+
+    Returns:
+        List of dicts with keys: postal_code, place_name, admin_name1,
+        admin_code1, country_code, latitude, longitude.
+    """
+    conn = get_connection()
+    code = postal_code.strip()
+    if not code:
+        return []
+
+    cursor = conn.execute(
+        """
+        SELECT postal_code, place_name, admin_name1, admin_code1,
+               country_code, latitude, longitude
+        FROM geonames_postal_codes
+        WHERE postal_code = ?
+        ORDER BY country_code, place_name
+        """,
+        (code,),
+    )
+    return _rows_to_dicts(cursor)
+
+
 def search_postal_by_place_name(town_name: str) -> list[dict]:
     """Search the postal-codes table by place name (all countries).
 
@@ -228,6 +259,58 @@ def search_postal_by_place_name(town_name: str) -> list[dict]:
         LIMIT 10
         """,
         (squashed,),
+    )
+    return _rows_to_dicts(cursor)
+
+
+def search_postal_by_place_name_cc(town_name: str, country_code: str) -> list[dict]:
+    """Search the postal-codes table by place name within a single country.
+
+    Country-filtered variant of :func:`search_postal_by_place_name`.
+    Useful in the deterministic path (Step 3) where we need to verify
+    a candidate exists in a specific country's postal data.
+
+    Returns:
+        List of dicts with same keys as ``search_postal_by_place_name``.
+    """
+    conn = get_connection()
+    norm = town_name.strip().lower()
+    cc = country_code.strip().upper()
+    if not norm or not cc:
+        return []
+
+    # 1) Exact (case-insensitive) match on place_name + country
+    cursor = conn.execute(
+        """
+        SELECT postal_code, place_name, admin_name1, admin_code1,
+               country_code, latitude, longitude
+        FROM geonames_postal_codes
+        WHERE country_code = ? AND LOWER(place_name) = ?
+        ORDER BY place_name
+        LIMIT 10
+        """,
+        (cc, norm),
+    )
+    rows = _rows_to_dicts(cursor)
+    if rows:
+        return rows
+
+    # 2) Space-insensitive fallback
+    squashed = norm.replace(" ", "").replace("-", "")
+    if len(squashed) < 4:
+        return []
+
+    cursor = conn.execute(
+        """
+        SELECT postal_code, place_name, admin_name1, admin_code1,
+               country_code, latitude, longitude
+        FROM geonames_postal_codes
+        WHERE country_code = ?
+          AND REPLACE(REPLACE(LOWER(place_name), ' ', ''), '-', '') = ?
+        ORDER BY place_name
+        LIMIT 10
+        """,
+        (cc, squashed),
     )
     return _rows_to_dicts(cursor)
 

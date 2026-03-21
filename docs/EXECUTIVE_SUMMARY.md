@@ -1,6 +1,6 @@
 # Structured Address AI — Executive Summary
 
-> **Date:** 19 February 2026
+> **Date:** 21 March 2026
 > **Version:** 3.2
 > **Audience:** Senior Leadership, Programme Stakeholders, Architecture Review Board
 > **Reference:** [Full Technical Design — DESIGN_V3.2.md](./DESIGN_V3.2.md)
@@ -18,6 +18,7 @@ Our systems receive millions of address records from customers and partners acro
 | `Via Roma 15, 08042 Barisardo (OG)` with country = **Ireland** | Address is in **Italy**, not Ireland — country code is wrong |
 | `123 Dbulin, Irleand` | City misspelled ("Dbulin" → Dublin), country misspelled |
 | `Hauptstraße 7, 1010` | No city name, no country — just a street and postal code |
+| `Italy,,,IT` | No actual address — just a country name |
 
 **Without clean, structured addresses**, downstream processes break:
 - Customer correspondence is misrouted
@@ -37,11 +38,13 @@ Our systems receive millions of address records from customers and partners acro
 Build an **intelligent address parsing pipeline** that:
 
 1. Takes a raw address row (free-form text + country code)
-2. Extracts the correct **city/town name** by cross-referencing a geographic database of 230,000+ cities worldwide
-3. Detects and corrects **wrong country codes**
-4. Assigns a **confidence score** (0–100%) to every result
-5. Flags low-confidence rows for **human review** instead of guessing
-6. Scales from a laptop (32K rows) to cloud infrastructure (millions of rows)
+2. Splits the raw text into structured parts — **building, street, town, postal code, country** — ready for regulatory output
+3. Extracts the correct **city/town name** by cross-referencing a geographic database of 230,000+ cities worldwide
+4. Detects and corrects **wrong country codes**
+5. Produces **regulatory-compliant address output** — two address lines (70 characters max each), separate town and country fields
+6. Assigns a **confidence score** (0–100%) to every result
+7. Flags low-confidence rows for **human review** instead of guessing
+8. Scales from a laptop (32K rows) to cloud infrastructure (millions of rows)
 
 ### The Key Principle
 
@@ -53,79 +56,333 @@ Most addresses (~85%) can be resolved by straightforward database lookups — no
 
 ## 3. How We Built It
 
-### 3.1 The 8-Step Pipeline
+### 3.1 The 9-Step Pipeline (Steps 0–8)
 
-Every address row goes through up to 8 steps. Think of it as an assembly line — each station does one specific job:
+Every address row enters the pipeline and passes through a sequence of processing steps. Think of it as an assembly line — each station does one specific job, and the address only visits the stations it needs. Most addresses are resolved quickly by the first few stations; only the trickiest ones go all the way to the end.
 
 ```
-┌─────────────────────────────────────────────────────────────────────────┐
-│                                                                         │
-│  📩 Raw Address Input                                                   │
-│  "Via Roma 15, 08042 Barisardo (OG)", country = IE                      │
-│                                                                         │
-│  ───── FAST PATH (rules — no AI) ─────────────────────────────────────  │
-│                                                                         │
-│  Step 0: CLEAN UP                                                       │
-│  ├─ Fix character encoding, remove extra spaces, standardise case       │
-│  └─ Extract postal code if embedded in the text                         │
-│                                                                         │
-│  Step 1: PARSE THE ADDRESS                                              │
-│  ├─ Use an address parsing library to split the text into parts:        │
-│  └─ street, building number, city candidate, postal code, state         │
-│                                                                         │
-│  Step 2: POSTAL CODE LOOKUP                                             │
-│  ├─ Look up the postal code in our geographic database                  │
-│  └─ Get a hint about which city and region this postal code belongs to  │
-│                                                                         │
-│  Step 3: EXACT CITY MATCH                                               │
-│  ├─ Try to find the city name in our database (exact match)             │
-│  ├─ Use postal code and region as tiebreakers if multiple matches       │
-│  └─ ✅ If confident match found → DONE (skip Steps 4–6)                │
-│                                                                         │
-│  Step 4: COUNTRY CHECK                                                  │
-│  ├─ Cross-check: does the city actually exist in the stated country?    │
-│  └─ If not → flag mismatch, suggest the correct country                 │
-│                                                                         │
-│  Step 5: FUZZY SCAN                                                     │
-│  ├─ Scan the raw address text against 200K+ city names                  │
-│  ├─ Handles misspellings and abbreviations                              │
-│  └─ ✅ If confident match found → DONE (skip Step 6)                   │
-│                                                                         │
-│  ───── AI PATH (only ~15% of rows reach here) ───────────────────────  │
-│                                                                         │
-│  Step 6: AI-ASSISTED RESOLUTION                                         │
-│  ├─ An AI model reads the address and reasons about it                  │
-│  ├─ The AI can query our geographic database using 5 lookup tools       │
-│  ├─ It considers: misspellings, wrong country, missing city name        │
-│  └─ Returns a verified city name with reasoning                         │
-│                                                                         │
-│  ───── ALWAYS RUNS ───────────────────────────────────────────────────  │
-│                                                                         │
-│  Step 7: SAFETY CHECK                                                   │
-│  ├─ Re-verify the resolved city against the geographic database         │
-│  ├─ Assign final confidence score                                       │
-│  └─ Downgrade to "needs human review" if the check fails               │
-│                                                                         │
-│  Step 8: SAVE RESULTS                                                   │
-│  └─ Write the structured result to the output file / database           │
-│                                                                         │
-│  📤 Structured Output                                                   │
-│  town = "Barisardo", country = IT (corrected), confidence = 75%         │
-│                                                                         │
-└─────────────────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────────────┐
+│                                                                              │
+│  📩 Raw Address Input                                                        │
+│  "Via Roma 15, 08042 Barisardo (OG)", country = IE                           │
+│                                                                              │
+│  ───── DETERMINISTIC PATH (rules — no AI) ─────────────────────────────────  │
+│                                                                              │
+│  Step 0: CLEAN UP                                                            │
+│  ├─ Fix character encoding, remove extra spaces, standardise case            │
+│  └─ Extract postal code if embedded in the text                              │
+│                                                                              │
+│  Step 1: PARSE THE ADDRESS  (using libpostal)                                │
+│  ├─ Use an address parsing library trained on 1 billion+ real-world          │
+│  │   addresses to split the raw text into structured parts:                  │
+│  │   street, building number, city candidate, postal code, state, country    │
+│  └─ Result: "Via Roma" (street), "15" (building), "08042" (postal code),     │
+│       "Barisardo" (city candidate)                                           │
+│                                                                              │
+│  ┌──────────────────────────────────────────────────────────────────────┐    │
+│  │ 🛡️ COUNTRY-ONLY GUARD (after Step 1)                                 │    │
+│  │ If parsing found ONLY a country name — no town, no street,           │    │
+│  │ no building, no postal code, no city candidates — then there is      │    │
+│  │ nothing meaningful to resolve. Examples: "Italy,,,IT" or blank       │    │
+│  │ address fields with just a country code.                             │    │
+│  │ Action: Mark as "needs human review" and skip straight to Step 8.    │    │
+│  │ This prevents the AI from inventing a city when none was provided.   │    │
+│  └──────────────────────────────────────────────────────────────────────┘    │
+│                                                                              │
+│  Step 2: POSTAL CODE LOOKUP  (using GeoNames postal-code database)           │
+│  ├─ Look up the postal code in our geographic database                       │
+│  └─ Get a hint about which city and region this postal code belongs to       │
+│       e.g., 08042 → Barisardo, Sardinia, Italy                               │
+│                                                                              │
+│  Step 3: EXACT CITY MATCH  (using GeoNames cities database + RapidFuzz)      │
+│  ├─ Try to find the city name in our database of 230,000+ cities             │
+│  ├─ Use postal code and region as tiebreakers if multiple matches            │
+│  ├─ Has a postal-code fallback — if the city isn't in the main database,     │
+│  │   search the postal-code dataset by place name (catches small towns)      │
+│  └─ ✅ If confident match found (≥95%) → DONE — skip to Step 8               │
+│                                                                              │
+│  Step 4: COUNTRY CHECK  (using GeoNames — cross-country search)              │
+│  ├─ Cross-check: does the city actually exist in the stated country?         │
+│  ├─ If not → search ALL countries for the city                               │
+│  └─ If found elsewhere → flag mismatch, suggest the correct country          │
+│                                                                              │
+│  Step 5: FUZZY SCAN  (using RapidFuzz + Unidecode)                           │
+│  ├─ Scan the raw address text against 200K+ city names using approximate     │
+│  │   matching — handles misspellings, abbreviations, and accented characters │
+│  ├─ Uses n-gram scanning to find city names buried in unstructured text      │
+│  └─ ✅ If confident match found (≥80%) → DONE — skip to Step 8               │
+│                                                                              │
+│  ───── AI PATH (only ~15% of rows reach here) ────────────────────────────   │
+│                                                                              │
+│  Step 6: AI-ASSISTED RESOLUTION  (using LLM via LiteLLM)                     │
+│  ├─ An AI model reads the address and reasons about it                       │
+│  ├─ The AI can query our geographic database using 5 lookup tools            │
+│  ├─ It considers: misspellings, wrong country, missing city name             │
+│  └─ Returns a verified city name with reasoning                              │
+│                                                                              │
+│  Step 7: AI SAFETY CHECK  (using GeoNames — revalidation)                    │
+│  ├─ Re-verify the AI-resolved city against the geographic database           │
+│  ├─ Assign final confidence score                                            │
+│  ├─ Downgrade to "needs human review" if the check fails                     │
+│  └─ Only runs after Step 6 (AI path). Deterministic paths already            │
+│       resolve against the database directly — re-checking is redundant.      │
+│                                                                              │
+│  ───── ALWAYS RUNS ────────────────────────────────────────────────────────  │
+│                                                                              │
+│  Step 8: SAVE RESULTS  (PersistAgent)                                        │
+│  ├─ Convert accented/non-Latin characters to plain ASCII                     │
+│  │   (e.g., "Brasília" → "Brasilia", "Zürich" → "Zurich") using Unidecode    │
+│  ├─ Build two regulatory address lines (max 70 characters each) from         │
+│  │   building + street + postal code — town and country are NOT included     │
+│  ├─ Look up the full country name from the country code                      │
+│  │   (e.g., "IT" → "Italy", "DE" → "Germany") using countriesV3.1.json       │
+│  ├─ Compute review_reason (why the row needs human review, if applicable)    │
+│  └─ Write the structured result to the output file / database                │
+│                                                                              │
+│  📤 Structured Output                                                        │
+│  input_address_1/2/3 = original text (audit trail)                           │
+│  address_line_1 = "Via Roma 15, 08042"                                       │
+│  address_line_2 = ""                                                         │
+│  town = "Barisardo", country = "Italy" (corrected from IE→IT)                │
+│  confidence = 75%, mismatch_detected = true                                  │
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘
 ```
 
-### 3.2 The Three Possible Paths
+### 3.2 The Four Pipeline Flows
 
-Not every address goes through all 8 steps:
+Not every address goes through all steps. The pipeline has four distinct flows, each optimised for a different scenario. The key concept is **early exit** — as soon as we're confident in the answer, we stop processing and jump straight to Step 8 (save results).
 
-| Path | Steps Run | When | Speed | % of Rows |
+| Flow | Steps Run | When | Speed | % of Rows |
 |------|-----------|------|-------|-----------|
-| **Fast path** | 0 → 1 → 2 → 3 → 7 → 8 | City found by exact match | ~20 ms | ~70% |
-| **Fuzzy path** | 0 → 1 → 2 → 3 → 4 → 5 → 7 → 8 | City found by fuzzy scan | ~50 ms | ~15% |
-| **AI path** | 0 → 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 | Requires AI reasoning | ~10 sec | ~15% |
+| **Flow 0 — Country-only** | 0 → 1 → guard → 8 | Address contains only a country name — nothing to resolve | ~5 ms | Rare (~1–2%) |
+| **Flow 1 — Exact match** | 0 → 1 → 2 → 3 → 8 | City found by exact database match at Step 3 (confidence ≥ 95%) | ~20 ms | ~57% |
+| **Flow 2 — Fuzzy scan** | 0 → 1 → 2 → 3 → 4 → 5 → 8 | City found by approximate text scanning at Step 5 (confidence ≥ 80%) | ~50 ms | ~15–28% |
+| **Flow 3 — AI path** | 0 → 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 | Requires AI reasoning. Step 7 re-verifies the AI's answer. | ~10 sec | ~15% |
 
-> **85% of rows never touch the AI model** — they're resolved in milliseconds by database lookups alone.
+**Key observations:**
+
+- **Flow 0** is a safety mechanism. When an address row contains only a country name (e.g., "Italy,,,IT"), there is no building, street, town, or postal code for the pipeline to work with. Rather than letting the AI invent an answer, the pipeline immediately flags the row for human review. This guard was specifically added after testing revealed that the AI model would fabricate city names (e.g., hallucinating "Louisa" for a USA-only address).
+
+- **Flows 1 and 2** resolve addresses using only rules and database lookups — **no AI is involved**. These rows are resolved in milliseconds with deterministic, reproducible results. Step 7 (the AI safety check) is intentionally skipped because Steps 3 and 5 already resolve directly against the GeoNames database — re-checking would be redundant.
+
+- **Flow 3** is the only flow that calls the AI model (Step 6). Because AI models can hallucinate, **Step 7 always follows Step 6** as a safety net — it re-verifies the AI's city answer against the GeoNames database before accepting it.
+
+> **~85% of rows never touch the AI model** — they're resolved in milliseconds by database lookups alone (Flows 0, 1, 2).
+
+### 3.3 How Each Step Works — In Detail
+
+#### Step 0: Clean Up
+
+**What it does:** Prepares the raw address text for processing.
+
+Every address arrives as messy free-form text. Before any analysis begins, the pipeline normalises the input:
+- Fixes character encoding issues (e.g., garbled accented characters)
+- Removes extra whitespace, trailing commas, and stray punctuation
+- Standardises case for consistent matching
+- If a postal code is embedded in the text (e.g., "Dublin 4"), extracts it as a separate field
+
+**Libraries used:** Standard Python string processing.
+
+**Example:**
+```
+Input:   "  via roma  15,  08042 BARISARDO  (OG)  "
+Output:  "via roma 15, 08042 barisardo (og)"   postal_code = "08042"
+```
+
+#### Step 1: Parse the Address (libpostal)
+
+**What it does:** Splits the cleaned text into structured components.
+
+This is where the heavy lifting of address understanding begins. The pipeline uses **libpostal**, a machine-learning library trained on over **1 billion real-world addresses** from OpenStreetMap. Libpostal understands address formats from virtually every country — European, Asian, Latin American, and more.
+
+Given a free-form address string, libpostal returns labelled parts:
+
+| Component | What It Means | Example |
+|-----------|--------------|---------|
+| `house_number` | Building/house number | "15" |
+| `road` | Street name | "Via Roma" |
+| `city` | City/town candidate | "Barisardo" |
+| `postcode` | Postal/ZIP code | "08042" |
+| `state` | State/region/province | "OG" (Ogliastra) |
+| `country` | Country name (if present in text) | "Italy" |
+
+**Why libpostal?** It handles international quirks that simple regex can't:
+- "Hauptstraße 7" (German: street comes first, then number)
+- "7-chōme Roppongi" (Japanese address format)
+- "Apt 3B, 42 Rue de Rivoli" (French: apartment number before street)
+
+**After Step 1 — the Country-Only Guard:**
+
+If libpostal found **only** a country name and nothing else (no town, no street, no building, no postal code, no city candidates), the pipeline short-circuits. There is simply nothing meaningful to look up. The row is marked `status = "needs_review"` with the warning `"country_only_address"` and jumps directly to Step 8. This is **Flow 0**.
+
+#### Step 2: Postal Code Lookup (GeoNames)
+
+**What it does:** Uses the postal code as a geographic hint.
+
+Postal codes are extremely valuable — they narrow down the geographic area before we even try to match the city name. The pipeline queries the **GeoNames postal-code database** (covering 1 million+ postal codes worldwide) to get:
+- The most likely city/town for that postal code
+- The admin1 region (state/province/canton)
+- The country
+
+This information becomes a **tiebreaker** in the next step. When multiple cities share the same name (e.g., "Springfield" appears in 30+ US states), the postal code tells us which one the sender meant.
+
+**Example:**
+```
+Postal code: 08042, Country: IT
+→ Place name: Barisardo, Admin region: Sardinia
+```
+
+#### Step 3: Exact City Match (GeoNames + RapidFuzz)
+
+**What it does:** Attempts to find the city name in the geographic database using exact (or very close) matching.
+
+This is the most critical step — it resolves the majority of addresses (~57%). The pipeline searches our GeoNames cities database (230,000+ cities with population ≥ 500) for the city candidate extracted by libpostal in Step 1.
+
+**The matching logic:**
+
+1. **Primary name match** — Look for an exact match on the city's primary name in GeoNames.
+2. **Alternate name match** — If no primary match, check GeoNames' extensive alternate-name index (historical names, translations, abbreviations). "Mumbai" matches even if GeoNames' primary name is "Bombay".
+3. **Postal-code-assisted disambiguation** — If multiple cities share the same name, use the postal code hint from Step 2 as a tiebreaker. "Springfield" + postal code 62704 → Springfield, Illinois (not Missouri or Massachusetts).
+4. **Population fallback** — If no postal code signal, prefer the largest city by population. "Paris" without any other context → Paris, France (population 2.1 million) over Paris, Texas (population 25,000).
+5. **Postal-code fallback** — If the city isn't in the main cities database (too small — population < 500), search the GeoNames postal-code dataset by place name. This catches small towns, villages, and hamlets that are too small for the main database.
+
+**Confidence threshold:** If the match scores ≥ 95% confidence, the address is considered resolved. The pipeline skips Steps 4–7 and jumps directly to Step 8. This is **Flow 1** — the fastest path.
+
+**Libraries used:** GeoNames SQLite database (329 MB), RapidFuzz for string similarity scoring.
+
+#### Step 4: Country Check (GeoNames — Cross-Country Search)
+
+**What it does:** Checks whether the city exists in the stated country, and if not, searches all countries.
+
+If Step 3 couldn't find the city in the stated country, maybe the **country code is wrong**. This is surprisingly common — a data entry operator selects "Ireland" from a dropdown when the address is actually Italian.
+
+The pipeline searches **every country** in the GeoNames database for the unmatched city name. If it finds the city in a different country:
+- Sets `mismatch_detected = true`
+- Records the `suggested_country_code` (e.g., "IT" instead of "IE")
+- The pipeline continues with the corrected country for Steps 5–8
+
+**Example:**
+```
+City: "Barisardo"   Stated country: IE (Ireland)
+→ Not found in Ireland
+→ Found in Italy (IT)  →  mismatch_detected = true, suggested_country_code = "IT"
+```
+
+#### Step 5: Fuzzy Scan (RapidFuzz + Unidecode)
+
+**What it does:** Scans the raw address text against 200,000+ city names using approximate (fuzzy) matching.
+
+When exact matching fails, the problem is usually a misspelling, an abbreviation, or a city name buried inside unstructured text. The fuzzy scanner uses two key techniques:
+
+1. **Fuzzy string comparison** (RapidFuzz) — Compares the address text against city names using edit-distance algorithms. Finds "Dbulin" when looking for "Dublin" (92% similarity) or "Morbi" when looking for "Morvi".
+
+2. **N-gram scanning** — Slides a window across the raw address text, extracting substrings of various lengths, and comparing each against the city database. This finds city names buried inside sentences: "delivered to Dublin Ireland ref 12345" → finds "Dublin" at position 14–19.
+
+3. **Character normalisation** (Unidecode) — Before comparing, all accented and non-Latin characters are converted to plain ASCII. "Zürich" becomes "Zurich", "Łódź" becomes "Lodz". This ensures matches work regardless of whether the sender used diacritics.
+
+**Safeguards:**
+- **Ambiguity margin** — If the top two fuzzy matches are too close in score (e.g., 90% vs 88%), neither is accepted. The row goes to the AI instead of guessing.
+- **Short-name caution** — City names ≤ 3 characters require extra-high confidence. "Aix" could match "Aix-en-Provence" or "Aix-les-Bains" — too ambiguous to accept on fuzzy match alone.
+
+**Confidence threshold:** If the match scores ≥ 80% confidence, the address is resolved. The pipeline skips Steps 6–7 and jumps to Step 8. This is **Flow 2**.
+
+**Libraries used:** RapidFuzz (fuzzy matching engine), Unidecode (ASCII transliteration).
+
+#### Step 6: AI-Assisted Resolution (LLM via LiteLLM)
+
+**What it does:** When all rules and database lookups have failed, an AI model reads the address and reasons about it.
+
+Only ~15% of addresses reach this step. The AI agent receives:
+- The original address text
+- Everything the earlier steps discovered (postal code hint, partial matches, mismatch flags)
+- Access to **5 database lookup tools** it can call to verify its reasoning
+
+The AI doesn't just guess — it actively queries our GeoNames database to check its hypotheses. For example:
+1. AI reads "Hauptstraße 7, 1010" and the postal hint "1010 → Vienna"
+2. AI calls the database: "Look up Vienna in Austria" → confirmed, geonames_id = 2761369
+3. AI responds: `{"town": "Vienna", "confidence": 0.75}`
+
+The AI is configured with **temperature = 0** (deterministic mode), meaning the same input always produces the same output. This ensures reproducibility.
+
+**Libraries used:** LiteLLM (AI model abstraction layer — allows swapping between local Ollama and cloud Gemini with a single config change).
+
+#### Step 7: AI Safety Check (GeoNames — Revalidation)
+
+**What it does:** Re-verifies the AI's answer against the geographic database.
+
+This step is a **trust-but-verify** safeguard. AI models can hallucinate — they occasionally invent plausible-sounding but incorrect city names. Step 7 takes the AI's proposed city name and:
+1. Looks it up in the GeoNames database
+2. Confirms it exists in the stated (or corrected) country
+3. Assigns a confidence score based on the quality of the match
+4. If the city doesn't check out → downgrades the row to `status = "needs_review"`
+
+**Important:** Step 7 runs **only after Step 6** (the AI path — Flow 3). Flows 1 and 2 skip Step 7 entirely because their results already come directly from verified database lookups — there is nothing to re-verify.
+
+#### Step 8: Save Results (PersistAgent)
+
+**What it does:** Assembles the final structured output and writes it to the output file or database. **This step always runs, on every flow.**
+
+Step 8 performs several important transformations before saving:
+
+1. **ASCII normalisation** — Converts accented and non-Latin characters in the resolved town name to plain ASCII using **Unidecode** (via the `to_ascii()` helper). GeoNames stores names with diacritics (e.g., "Brasília", "Medellín", "Jonquières"), but downstream regulatory systems expect plain ASCII. Examples:
+   - "Brasília" → "Brasilia"
+   - "Medellín" → "Medellin"
+   - "Zürich" → "Zurich"
+
+2. **Regulatory address line construction** — Builds two address lines (`address_line_1`, `address_line_2`) from the parsed components (building, street, postal code). Each line is **capped at 70 characters** — a regulatory constraint. Town and country are **excluded** from these lines (they have their own dedicated output fields). If the combined text exceeds 70 characters, the splitter breaks at a word boundary to avoid cutting words in half.
+
+3. **Country name lookup** — Converts the ISO alpha-2 country code (e.g., "IT") to the full English country name (e.g., "Italy") using the `countriesV3.1.json` reference file. This produces the `country` output field alongside the `country_code`.
+
+4. **Review reason computation** — Determines *why* a row was flagged for human review (if applicable). Examples: `"country_only_address"`, `"low_confidence"`, `"ambiguous_match"`.
+
+5. **Final result assembly** — Combines all input, extracted, and metadata fields into the final output record.
+
+### 3.4 What Comes Out — The 21 Output Fields
+
+Every processed address produces a structured record with 21 fields, organised into three categories:
+
+#### Input Audit Trail (4 fields)
+
+These preserve the **original input exactly as received** — unchanged. They serve as an audit trail so you can always trace back to what was submitted.
+
+| Field | Description |
+|-------|-------------|
+| `input_address_1` | Original first address line (from input `address_1`) |
+| `input_address_2` | Original second address line (from input `address_2`) |
+| `input_address_3` | Original third address line (from input `address_3`) |
+| `country_code` | ISO alpha-2 country code from input (e.g., "IT", "IE", "DE") |
+
+#### Regulatory / Extracted Fields (7 fields)
+
+These are the **structured output** — cleaned, verified, and ready for downstream systems.
+
+| Field | Description |
+|-------|-------------|
+| `address_line_1` | First regulatory address line (max 70 chars). Built from building + street + postal code. Does **not** contain town or country. |
+| `address_line_2` | Second regulatory address line (max 70 chars). Overflow from line 1, or empty if line 1 fits everything. |
+| `building` | Building/house number extracted by libpostal (e.g., "15") |
+| `street` | Street name extracted by libpostal (e.g., "Via Roma") |
+| `town` | Resolved and verified city/town name, ASCII-normalised (e.g., "Barisardo") |
+| `country` | Full English country name derived from country code (e.g., "Italy") |
+| `postal_code` | Postal/ZIP code from parsing or postal lookup (e.g., "08042") |
+
+#### Pipeline Metadata (10 fields)
+
+These describe **how** the pipeline processed the address — useful for quality monitoring, filtering, and audit.
+
+| Field | Description |
+|-------|-------------|
+| `status` | `"validated"` (confident), `"needs_review"` (uncertain), or `"rejected"` (no match) |
+| `confidence_score` | 0.00–1.00 — how confident the pipeline is in the result |
+| `parser_source` | Which component resolved the city: `"libpostal"` (Step 3), `"geonames_scan"` (Step 5), or `"llm_agent"` (Step 6) |
+| `geonames_match` | `true` / `false` — was the city found in the GeoNames database? |
+| `geonames_id` | The GeoNames ID of the matched city (e.g., 2523630 for Barisardo) — links to an authoritative geographic record |
+| `normalized_town` | ASCII-normalised town name (redundant when town is already ASCII, but shows the normalisation for names like Brasília → Brasilia) |
+| `warnings` | Semicolon-separated list of processing warnings (e.g., `"country_only_address"`) |
+| `review_reason` | Why the row needs human review (e.g., `"low_confidence"`, `"ambiguous_match"`) — empty if validated |
+| `mismatch_detected` | `true` / `false` — was the stated country code different from where the city was actually found? |
+| `suggested_country_code` | If a mismatch was detected, the correct country code (e.g., "IT" when input said "IE") |
 
 ---
 
@@ -149,7 +406,7 @@ Not every address goes through all 8 steps:
 
 ### 5.1 The Agent Architecture
 
-We organise the pipeline as a team of **5 specialist agents**, each with a clear responsibility:
+We organise the pipeline as a team of **4 specialist agents**, each with a clear responsibility:
 
 ```
 ┌──────────────────────────────────────────────────────────────────┐
@@ -160,14 +417,17 @@ We organise the pipeline as a team of **5 specialist agents**, each with a clear
 │                                                                  │
 │   ┌──────────────────────────────────────────────────────────┐   │
 │   │  1. Deterministic Resolver (the rule follower)           │   │
-│   │     Steps 0–5: Clean, parse, look up, match             │   │
-│   │     Resolves ~85% of addresses with NO AI               │   │
+│   │     Steps 0–5: Clean, parse, country-only guard,         │   │
+│   │     look up, match, country check, fuzzy scan            │   │
+│   │     Resolves ~85% of addresses with NO AI                │   │
+│   │     Contains the country-only guard after Step 1         │   │
 │   └──────────────────────────────────────────────────────────┘   │
 │                        │                                         │
 │            ┌───────────┴───────────┐                             │
 │            │ Resolved?             │                             │
 │            │                       │                             │
 │          YES                      NO                             │
+│       (Flow 0/1/2)             (Flow 3)                          │
 │          (skip AI)              (need AI)                        │
 │            │                       │                             │
 │            │   ┌───────────────────┴──────────────────────┐      │
@@ -177,18 +437,20 @@ We organise the pipeline as a team of **5 specialist agents**, each with a clear
 │            │   │     Only called for ~15% of rows         │      │
 │            │   └───────────────────┬──────────────────────┘      │
 │            │                       │                             │
+│            │   ┌───────────────────┴──────────────────────┐      │
+│            │   │  3. Revalidation Agent (the auditor)     │      │
+│            │   │     Step 7: Re-verifies AI results only  │      │
+│            │   │     Catches hallucinations before output │      │
+│            │   │     Only runs on AI path (Flow 3)        │      │
+│            │   └───────────────────┬──────────────────────┘      │
+│            │                       │                             │
 │            └───────────┬───────────┘                             │
 │                        │                                         │
 │   ┌────────────────────┴─────────────────────────────────────┐   │
-│   │  3. Safety Checker (the auditor)                         │   │
-│   │     Step 7: Re-verifies the result against the database  │   │
-│   │     Assigns confidence score, flags uncertain results    │   │
-│   │     ALWAYS runs — no exceptions                          │   │
-│   └────────────────────┬─────────────────────────────────────┘   │
-│                        │                                         │
-│   ┌────────────────────┴─────────────────────────────────────┐   │
-│   │  4. Result Writer (the recorder)                         │   │
-│   │     Step 8: Saves the final structured address           │   │
+│   │  4. Persist Agent (the recorder)                         │   │
+│   │     Step 8: ASCII normalisation, regulatory address      │   │
+│   │     line construction, country name lookup, saves the    │   │
+│   │     final structured output (21 fields)                  │   │
 │   │     ALWAYS runs — no exceptions                          │   │
 │   └──────────────────────────────────────────────────────────┘   │
 │                                                                  │
@@ -200,8 +462,10 @@ We organise the pipeline as a team of **5 specialist agents**, each with a clear
 | Decision | Rationale |
 |----------|-----------|
 | **Rules first, AI second** | 85% of work is done instantly by database lookups. AI is expensive and slow — only use it when necessary. Estimated cost saving: **270× cheaper** than a pure-AI approach. |
-| **5 agents** | Steps 0–5 are simple functions — they don't need their own agents. |
-| **Safety check always runs** | Every resolved city is re-verified against the database, regardless of how it was resolved. No unverified result reaches the output. |
+| **4 agents** | Steps 0–5 are simple deterministic functions — they don't need their own agents. They're grouped into the Deterministic Resolver. Step 7 (Revalidation) runs only after AI. Step 8 (Persist) always runs. |
+| **Country-only guard** | Prevents AI from hallucinating city names when the input contains only a country name. Catches a real-world failure mode observed during testing. |
+| **Step 7 only on AI path** | Deterministic paths (Flows 1, 2) resolve directly against the GeoNames database — the data is already verified. Re-checking verified data adds latency with no benefit. The AI path needs this check because LLMs can hallucinate. |
+| **Regulatory output in Step 8** | Two address lines (70 chars each, no town/country) are built once at the end from the verified components, ensuring downstream regulatory systems receive properly formatted data. |
 | **Confidence scores on every row** | Stakeholders can set their own threshold — e.g., "auto-accept above 85%, send below 85% to manual review". |
 
 ---
@@ -295,7 +559,26 @@ The pipeline checks **every unmatched city against all countries** in the databa
 
 The pipeline has a **postal code fallback**. Towns too small for the main city database often still appear in the GeoNames postal code dataset. If all other lookups fail, we search postal codes by place name as a last resort. This catches small towns like hamlets and rural communities.
 
-### 6.6 Missing City Name Entirely
+### 6.6 Country-Only Address — Nothing to Resolve
+
+**The problem:** Some address rows contain only a country name — no street, no city, no postal code. Example: "Italy,,,IT" or blank address fields with just a country code.
+
+**How we solve it:**
+
+```
+Input: "Italy"   country = IT
+
+  Step 1: Parse → libpostal extracts "Italy" as country, nothing else
+  Country-only guard: Only country detected — no town, street, building, postal code
+  → Mark "needs_review", warning = "country_only_address"
+  → Skip Steps 2–7 entirely → Jump to Step 8
+
+  Result: needs_review, confidence = 0%, review_reason = "country_only_address"
+```
+
+This guard was added after testing revealed that without it, the AI model would **invent** a city name (e.g., hallucinating "Louisa" for a USA-only address). The guard ensures the pipeline never fabricates data when there's nothing to work with.
+
+### 6.7 Missing City Name Entirely
 
 **The problem:** Some addresses contain only a street, a postal code, and a country — no city name at all. Example: "Hauptstraße 7, 1010".
 
@@ -317,17 +600,18 @@ Input: "Hauptstraße 7, 1010"   country = AT (Austria)
 
 The **postal code hint from Step 2** gives the AI critical context even when no city name appears in the text.
 
-### 6.7 Edge Case Summary
+### 6.8 Edge Case Summary
 
 | Scenario | Pipeline Response | Outcome |
 |----------|------------------|---------|
+| Address contains only a country name | Country-only guard (Flow 0) → "needs_review" immediately | No fabricated data |
 | City name appears in multiple countries | Check all countries, flag mismatch if wrong country stated | Country code corrected |
 | City name appears multiple times within a country | Disambiguate using postal code region as tiebreaker; fall back to largest by population | Correct city selected |
 | City name is misspelled | Fuzzy matching with configurable similarity threshold | Matched despite typo |
 | City has alternate/historical names | GeoNames alternate-name index covers synonyms | Matched on any valid name |
-| Address has accented characters | Transliterated to ASCII before matching | "Zürich" = "Zurich" |
+| Address has accented characters | Transliterated to ASCII before matching (Unidecode); output also ASCII-normalised | "Zürich" = "Zurich" |
 | Two fuzzy matches are too close to call | Ambiguity margin check rejects both; row goes to AI or human review | No false positive |
-| City too small for main database | Postal code dataset fallback | Matched via postal data |
+| City too small for main database | Postal code dataset fallback in Step 3 | Matched via postal data |
 | No city name in address at all | AI uses postal code hint + reasoning | AI resolves or flags for review |
 | All else fails | Row marked "needs_review" with confidence = 0% | Human reviews — never a wrong guess |
 
@@ -388,20 +672,20 @@ The same pipeline code runs in three modes with **zero code changes**:
 │                                                                         │
 │  📋 SAME PIPELINE CODE                                                  │
 │                                                                         │
-│  ┌─────────────────┐   ┌─────────────────┐   ┌──────────────────────┐  │
-│  │  🖥️ LOCAL DEV    │   │  🌐 WEB API      │   │  ☁️ CLOUD BATCH      │  │
-│  │                  │   │                  │   │                      │  │
-│  │  Developer's     │   │  REST API on     │   │  Google Cloud        │  │
-│  │  laptop          │   │  Cloud Run       │   │  Dataflow            │  │
-│  │                  │   │                  │   │                      │  │
-│  │  Reads Excel/CSV │   │  Receives JSON   │   │  Reads from cloud    │  │
-│  │  Writes CSV      │   │  Returns JSON    │   │  storage             │  │
-│  │                  │   │                  │   │                      │  │
-│  │  AI: Ollama      │   │  AI: Gemini      │   │  AI: Gemini          │  │
-│  │  (local, free)   │   │  (cloud)         │   │  (cloud)             │  │
-│  │                  │   │                  │   │                      │  │
-│  │  32K rows        │   │  On-demand       │   │  5M rows/day         │  │
-│  └─────────────────┘   └─────────────────┘   └──────────────────────┘  │
+│  ┌─────────────────┐   ┌─────────────────┐   ┌──────────────────────┐   │
+│  │  🖥️ LOCAL DEV   │   │  🌐 WEB API     │   │  ☁️ CLOUD BATCH      │   │
+│  │                 │   │                 │   │                      │   │
+│  │  Developer's    │   │  REST API on    │   │  Google Cloud        │   │
+│  │  laptop         │   │  Cloud Run      │   │  Dataflow            │   │
+│  │                 │   │                 │   │                      │   │
+│  │  Reads Excel/CSV│   │  Receives JSON  │   │  Reads from cloud    │   │
+│  │  Writes CSV     │   │  Returns JSON   │   │  storage             │   │
+│  │                 │   │                 │   │                      │   │
+│  │  AI: Ollama     │   │  AI: Gemini     │   │  AI: Gemini          │   │
+│  │  (local, free)  │   │  (cloud)        │   │  (cloud)             │   │
+│  │                 │   │                 │   │                      │   │
+│  │  32K rows       │   │  On-demand      │   │  5M rows/day         │   │
+│  └─────────────────┘   └─────────────────┘   └──────────────────────┘   │
 │                                                                         │
 └─────────────────────────────────────────────────────────────────────────┘
 ```
@@ -438,13 +722,19 @@ The progression is seamless — no re-architecture required at any stage.
 
 | Milestone | Status |
 |-----------|--------|
-| 8-step pipeline logic (Steps 0–8) | ✅ Implemented & tested |
-| Agent architecture (5 agents, conditional routing) | ✅ Implemented & tested |
+| 9-step pipeline logic (Steps 0–8) with 4 flows | ✅ Implemented & tested |
+| Agent architecture (4 agents, conditional routing) | ✅ Implemented & tested |
+| Country-only guard (Flow 0) | ✅ Implemented — prevents AI hallucination on empty addresses |
 | GeoNames database (230K+ cities, postal codes, regions) | ✅ Loaded (329 MB SQLite) |
+| Regulatory output fields (21 columns, address_line_1/2 at 70 chars) | ✅ Implemented & tested |
+| ASCII normalisation (Unidecode) on output town names | ✅ Implemented & tested |
+| Country name lookup (countriesV3.1.json) | ✅ Implemented & tested |
 | Local AI integration (Ollama) | ✅ Working — qwen2.5-coder:14b model |
 | Batch processing with crash recovery | ✅ Implemented — checkpoint + resume |
 | 13-row test file end-to-end | ✅ All rows processed correctly |
+| Automated test suite | ✅ 399 non-LLM tests passing |
 | Design document (v3.2) | ✅ Complete |
+| Interactive dashboard (HTML/JS) | ✅ Renders all 21 output columns |
 | **32K-row batch processing** | 🔜 Next — infrastructure is ready |
 | Cloud API deployment (Cloud Run) | 📋 Planned — Phase 9 |
 | Cloud batch processing (Dataflow) | 📋 Planned — Phase 9/10 |

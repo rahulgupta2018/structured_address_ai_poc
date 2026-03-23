@@ -641,6 +641,7 @@ CLUSTER BY country_code, town;
 | **Key views** | Batch summary (per job), confidence distribution histogram, country mismatch report, sample row drill-down |
 | **Review action** | Read-only spot-check. No row-level approval (millions of rows). Data steward approves the batch by updating `staging.jobs.review_status` via gcloud CLI, Apps Script, or Cloud Function endpoint. |
 | **Cost** | Free (included with Google Workspace) |
+| **Dashboard mock** | See [`docs/looker_dashboard_mock.drawio`](looker_dashboard_mock.drawio) for the wireframe layout: 6 KPI scorecards → status donut + confidence histogram + parser breakdown → country mismatch table → sample row drill-down → approval CTA. |
 
 ---
 

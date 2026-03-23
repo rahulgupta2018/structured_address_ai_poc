@@ -108,10 +108,10 @@ The same agent code runs unchanged across all deployment modes: local CLI and Da
 Job 1: Process Pipeline (scheduled / event-triggered)
   CSV → GCS → Dataflow → BigQuery staging table
   ↓
-  Data stewards review results via reporting tool (Looker Studio)
+  Data stewards spot-check batch results via Looker Studio dashboard
   ↓
-Job 2: Promote (manually triggered after review)
-  BigQuery staging (approved rows) → Dataflow → BigQuery main table
+Job 2: Promote (manually triggered after batch sign-off)
+  BigQuery staging (all rows for approved job) → Dataflow → BigQuery production table
 ```
 
 ---
@@ -200,8 +200,8 @@ Job 2: Promote (manually triggered after review)
 │  │                                                                     │    │
 │  │  Looker Studio / Connected Sheets                                   │    │
 │  │  ├── Dashboard on BigQuery staging table                            │    │
-│  │  ├── Data stewards review flagged rows (needs_review / rejected)    │    │
-│  │  └── Mark rows as approved → triggers Dataflow Job 2                │    │
+│  │  ├── Data stewards spot-check sample rows, review batch metrics     │    │
+│  │  └── Sign off on batch → triggers Dataflow Job 2                    │    │
 │  │                                                                     │    │
 │  └─────────────────────────────────────────────────────────────────────┘    │
 │                                                                             │
@@ -310,24 +310,32 @@ Job 2: Promote (manually triggered after review)
 │  (all rows from Dataflow Job 1)                                           │
 │                                                                           │
 │  ┌─────────────────────────────────────────────────────┐                  │
-│  │  status = 'validated'    (85%)  ← auto-approved     │                  │
-│  │  status = 'needs_review' (10%)  ← flagged for review│                  │
-│  │  status = 'rejected'    (5%)   ← auto-rejected      │                  │
+│  │  status = 'validated'    (85%)                       │                  │
+│  │  status = 'needs_review' (10%)                       │                  │
+│  │  status = 'rejected'    (5%)                         │                  │
 │  └──────────────────────────┬──────────────────────────┘                  │
+│                              │                                            │
+│  BigQuery: staging.jobs                                                   │
+│  ├── review_status = 'pending' (set by Job 1 on completion)               │
+│  └── review_status = 'approved' (set by data steward after spot-check)    │
 └─────────────────────────────┼─────────────────────────────────────────────┘
                               │
                               ▼
 ┌───────────────────────────────────────────────────────────────────────────┐
-│  Looker Studio / Connected Sheets (Reporting Tool)                        │
+│  Looker Studio (Reporting Tool — read-only spot-check)                    │
 │                                                                           │
-│  ├── Dashboard: batch summary, confidence distribution, country mismatches│
-│  ├── Review view: filter by status = 'needs_review'                       │
-│  ├── Data stewards: inspect flagged rows, verify town, update status      │
-│  │   ├── Approve → UPDATE staging.pipeline_results SET review_status =    │
-│  │   │             'approved' WHERE ...                                   │
-│  │   └── Reject  → UPDATE staging.pipeline_results SET review_status =    │
-│  │                  'rejected_by_reviewer' WHERE ...                      │
-│  └── Validated rows are auto-approved (no manual review needed)           │
+│  ├── Batch summary: total rows, validated %, needs_review %, rejected %   │
+│  ├── Confidence distribution: histogram of confidence scores              │
+│  ├── Country mismatch report: rows where suggested ≠ input country code   │
+│  ├── Sample rows: drill into random sample to verify correctness          │
+│  │                                                                        │
+│  │  NOTE: No row-level approval UI. Records are in the millions.          │
+│  │  Review is batch-level spot-checking, not per-row triage.              │
+│  │                                                                        │
+│  └── Decision is per-job: "this batch looks good" → approve the job       │
+│                                                                           │
+│  Data steward approves the batch:                                         │
+│    UPDATE staging.jobs SET review_status = 'approved' WHERE job_id = @id  │
 │                                                                           │
 └───────────────────────────────┬───────────────────────────────────────────┘
                                 │  Manual trigger (gcloud / console / Cloud Function)
@@ -335,26 +343,30 @@ Job 2: Promote (manually triggered after review)
 ┌───────────────────────────────────────────────────────────────────────────┐
 │  Dataflow Job 2: address-promote                                          │
 │                                                                           │
+│  ├── Verify: staging.jobs WHERE job_id = @job_id                          │
+│  │     AND review_status = 'approved' AND promoted = FALSE                │
+│  │                                                                        │
 │  ├── ReadFromBigQuery: staging.pipeline_results                           │
-│  │     WHERE review_status IN ('approved', 'auto_approved')               │
-│  │     AND promoted = FALSE                                               │
+│  │     WHERE job_id = @job_id                                             │
+│  │     (all rows for the approved job — no per-row filter)                │
 │  │                                                                        │
 │  ├── Transform: map staging schema → production schema                    │
 │  │                                                                        │
 │  ├── WriteToBigQuery: production.address_master                           │
 │  │     (WRITE_APPEND or merge on primary key)                             │
 │  │                                                                        │
-│  └── Update staging: SET promoted = TRUE, promoted_at = CURRENT_TIMESTAMP │
+│  └── Update: staging.jobs SET promoted = TRUE,                            │
+│  │           promoted_at = CURRENT_TIMESTAMP WHERE job_id = @job_id       │
 │                                                                           │
-│  Triggered: Manually by data steward after review is complete             │
-│  Frequency: After each review cycle (typically once per batch)            │
-│  Idempotent: promoted flag prevents duplicate promotion                   │
+│  Triggered: Manually by data steward after batch spot-check               │
+│  Frequency: Once per batch (after review sign-off)                        │
+│  Idempotent: promoted flag on jobs table prevents duplicate promotion     │
 └───────────────────────────────────────────────────────────────────────────┘
                                 │
                                 ▼
 ┌───────────────────────────────────────────────────────────────────────────┐
 │  BigQuery: production.address_master                                      │
-│  (clean, reviewed data — source of truth for downstream consumers)        │
+│  (clean, spot-checked data — source of truth for downstream consumers)    │
 │                                                                           │
 │  ├── Downstream reporting tools                                           │
 │  ├── Data lake / data warehouse consumers                                 │
@@ -452,22 +464,24 @@ WORKDIR /app
 | **Auto-scaling** | 1–5 workers |
 | **Pipeline type** | Batch |
 | **Trigger** | Manually triggered by data steward (gcloud CLI, console, or Cloud Function endpoint) |
-| **Input** | BigQuery `staging.pipeline_results WHERE review_status IN ('approved','auto_approved') AND promoted = FALSE` |
+| **Pre-check** | Verifies `staging.jobs WHERE job_id = @job_id AND review_status = 'approved' AND promoted = FALSE` |
+| **Input** | BigQuery `staging.pipeline_results WHERE job_id = @job_id` (all rows for the approved job) |
 | **Output** | BigQuery `production.address_master` |
-| **Post-action** | Updates `staging.pipeline_results SET promoted = TRUE, promoted_at = CURRENT_TIMESTAMP` |
+| **Post-action** | Updates `staging.jobs SET promoted = TRUE, promoted_at = CURRENT_TIMESTAMP WHERE job_id = @job_id` |
 
 **Beam pipeline (simplified):**
 
 ```python
 with beam.Pipeline(options=pipeline_options) as p:
-    approved_rows = (
+    # Pre-check: verify job is approved and not yet promoted
+    # (done in Cloud Function trigger before launching Dataflow)
+
+    rows = (
         p
         | 'ReadStaging' >> beam.io.ReadFromBigQuery(
             query="""
                 SELECT * FROM staging.pipeline_results
-                WHERE review_status IN ('approved', 'auto_approved')
-                  AND promoted = FALSE
-                  AND job_id = @job_id
+                WHERE job_id = @job_id
             """,
             use_standard_sql=True)
         | 'MapToProductionSchema' >> beam.Map(map_staging_to_production)
@@ -482,12 +496,12 @@ with beam.Pipeline(options=pipeline_options) as p:
 
 | Attribute | Value |
 |-----------|-------|
-| **Dataset: staging** | Pipeline results, job metadata (written by Job 1, read by reviewers + Job 2) |
+| **Dataset: staging** | Pipeline results, job metadata (written by Job 1, read by spot-checkers + Job 2) |
 | **Dataset: production** | Promoted address data (written by Job 2, read by downstream systems) |
 | **Dataset: reference** | GeoNames cities, postal codes (loaded by ETL, used for analytics/reporting) |
 | **Location** | europe-west2 (London) |
 | **Encryption** | CMEK via Cloud KMS |
-| **Access control** | Dataset-level IAM. Staging: read/write for pipeline, read for reviewers. Production: write for promote job, read for consumers. |
+| **Access control** | Dataset-level IAM. Staging: read/write for pipeline, read for spot-checkers. Production: write for promote job, read for consumers. |
 | **Streaming inserts** | Used by Dataflow Job 1 (low-latency writes during batch processing) |
 | **Cost model** | Storage: $0.02/GB/month. Queries: $6.25/TB scanned (on-demand). |
 
@@ -517,22 +531,13 @@ CREATE TABLE staging.pipeline_results (
     llm_completion_tokens INT64 DEFAULT 0,
     processing_time_ms  INT64,
 
-    -- Review workflow columns
-    review_status       STRING DEFAULT 'pending', -- pending|auto_approved|approved|rejected_by_reviewer
-    reviewer            STRING,
-    reviewed_at         TIMESTAMP,
-    review_notes        STRING,
-
-    -- Promotion tracking
-    promoted            BOOL DEFAULT FALSE,
-    promoted_at         TIMESTAMP,
-    promoted_job_id     STRING,                   -- Job 2 run that promoted this row
-
     created_at          TIMESTAMP DEFAULT CURRENT_TIMESTAMP(),
 )
 PARTITION BY DATE(created_at)
-CLUSTER BY job_id, status, review_status;
+CLUSTER BY job_id, status;
 ```
+
+> **Design note — no per-row review or promotion columns.** With millions of rows per batch, there is no UI for row-level approval. Review is a batch-level spot-check via Looker Studio. Promotion state (`review_status`, `promoted`, `promoted_at`) lives on `staging.jobs` — the unit of promotion is the entire job, not individual rows.
 
 **Schema — staging.jobs:**
 
@@ -544,13 +549,18 @@ CREATE TABLE staging.jobs (
     processed_rows      INT64 DEFAULT 0,
     deterministic_count INT64 DEFAULT 0,
     llm_count           INT64 DEFAULT 0,
+    validated_count     INT64 DEFAULT 0,
+    needs_review_count  INT64 DEFAULT 0,
+    rejected_count      INT64 DEFAULT 0,
     status              STRING DEFAULT 'running',  -- running|completed|failed
     started_at          TIMESTAMP DEFAULT CURRENT_TIMESTAMP(),
     completed_at        TIMESTAMP,
     error_message       STRING,
-    -- Review summary (updated after review)
-    approved_count      INT64 DEFAULT 0,
-    rejected_count      INT64 DEFAULT 0,
+
+    -- Batch-level review & promotion (unit of review = entire job)
+    review_status       STRING DEFAULT 'pending',  -- pending|approved
+    reviewed_by         STRING,
+    reviewed_at         TIMESTAMP,
     promoted            BOOL DEFAULT FALSE,
     promoted_at         TIMESTAMP,
 );
@@ -580,7 +590,7 @@ PARTITION BY DATE(promoted_at)
 CLUSTER BY country_code, town;
 ```
 
-**Auto-approval rule:** Rows with `status = 'validated'` and `confidence_score >= 0.85` are automatically set to `review_status = 'auto_approved'` by a post-processing step in Dataflow Job 1. Only `needs_review` rows require manual inspection.
+**Auto-approval rule:** When Job 1 completes, if ≥ 95% of rows have `status = 'validated'` with `confidence_score >= 0.85`, the job's `review_status` is automatically set to `'approved'` and Job 2 can be triggered immediately. Otherwise, the job remains `'pending'` for data steward spot-check via Looker Studio before manual approval.
 
 ### 6.4 Memorystore (Redis)
 
@@ -621,15 +631,15 @@ CLUSTER BY country_code, town;
 | **Region** | europe-west2 (same as data) |
 | **Quota** | 1,000 RPM (requests per minute) — request increase if needed |
 
-### 6.7 Looker Studio (Review Tool)
+### 6.7 Looker Studio (Spot-Check & Reporting)
 
 | Attribute | Value |
 |-----------|-------|
-| **Data source** | BigQuery `staging.pipeline_results` |
-| **Users** | Data stewards (review), managers (oversight) |
+| **Data source** | BigQuery `staging.pipeline_results` + `staging.jobs` |
+| **Users** | Data stewards (spot-check), managers (oversight) |
 | **Access** | Google Workspace SSO, IAM-controlled BigQuery access |
-| **Key views** | Batch summary, flagged rows (needs_review), confidence distribution, country mismatch report |
-| **Review action** | Reviewers update `review_status` in BigQuery via Connected Sheets or a lightweight Apps Script form |
+| **Key views** | Batch summary (per job), confidence distribution histogram, country mismatch report, sample row drill-down |
+| **Review action** | Read-only spot-check. No row-level approval (millions of rows). Data steward approves the batch by updating `staging.jobs.review_status` via gcloud CLI, Apps Script, or Cloud Function endpoint. |
 | **Cost** | Free (included with Google Workspace) |
 
 ---
@@ -659,9 +669,9 @@ CLUSTER BY country_code, town;
 │                                                                            │
 │                                                     ┌──────────────────┐   │
 │                                                     │ Data stewards    │   │
-│                                                     │ review flagged   │   │
-│                                                     │ rows, approve /  │   │
-│                                                     │ reject           │   │
+│                                                     │ spot-check batch │   │
+│                                                     │ via Looker       │   │
+│                                                     │ Studio dashboard │   │
 │                                                     └────────┬─────────┘   │
 │                                                              │             │
 │                                                     Manual trigger         │
@@ -705,7 +715,36 @@ CLUSTER BY country_code, town;
 | Redis cache | 24h (LLM), 7d (geo) | Memorystore | TTL-based automatic eviction |
 | Archive exports (GCS) | 7 years | Coldline | GCS lifecycle policy |
 
-### 7.4 GeoNames Data Refresh
+### 7.4 Reference Data Sources
+
+The pipeline relies on four reference datasets — three from GeoNames.org (open-source geographic database) and one from REST Countries (open-source country metadata). These files live in `data/reference/` during development and are loaded into Cloud Spanner (for pipeline processing) and BigQuery (for reporting) in production.
+
+#### 7.4.1 GeoNames Source Files
+
+| File | Records | Description |
+|------|---------|-------------|
+| **`cities500.txt`** | ~200K rows | All cities with population ≥ 500. Tab-separated, no header. Each row contains: GeoName ID, primary name, ASCII name, comma-separated alternate names, latitude, longitude, feature class/code, ISO country code, admin1 code, and population. This is the primary city-matching reference — the pipeline's `geonames_cities` table is built from this file. Alternate names are exploded into a separate `geonames_city_names` lookup table for fuzzy and multi-language matching. |
+| **`allCountries.txt`** | ~1.8M rows | Global postal code dataset. Tab-separated, no header. Each row contains: ISO country code, postal code, place name, up to three levels of admin names/codes, latitude, longitude, and accuracy indicator. Loaded into the `geonames_postal_codes` table. Used as a fallback when a town is too small for `cities500.txt` — the pipeline matches on postal code + place name to resolve towns not in the main cities table (e.g., Taxila, Pakistan). |
+| **`admin1CodesASCII.txt`** | ~3.8K rows | First-level administrative divisions (states, provinces, regions). Tab-separated, no header. Each row contains: composite code (e.g., `US.IL`), name, ASCII name, and GeoName ID. Loaded into the `geonames_admin1` table. Used to resolve `admin1_code` references in city records to human-readable region names (e.g., `GB.ENG` → "England"). |
+
+**ETL process** (`src/geonames_etl.py`): Parses all three files, normalizes names (ASCII folding, lowercase), creates indexed SQLite tables locally, and can target Cloud Spanner in production. The ETL also builds a `geonames_city_names` table (~800K+ rows) by exploding each city's primary, ASCII, and alternate names into separate normalized rows for efficient exact-match lookup.
+
+#### 7.4.2 Country Reference File
+
+| File | Records | Description |
+|------|---------|-------------|
+| **`countriesV3.1.json`** | 250 entries | Country metadata from the REST Countries v3.1 API (open-source, CC-BY-SA licensed). A JSON array where each entry contains: common and official names (with native-language variants), ISO codes (`cca2` alpha-2, `ccn3` numeric, `cca3` alpha-3), top-level domain, capital city, region/subregion, languages, currencies, calling codes, alternate spellings, and lat/lng. |
+
+**Used by two services:**
+
+| Service | Usage |
+|---------|-------|
+| `services/libpostal_parser.py` | **Country name → ISO alpha-2 code.** When libpostal extracts a country name from an address (e.g., "United Kingdom"), this lookup converts it to the 2-letter code (`GB`). Indexes common name, official name, and `altSpellings` for broad coverage (~350+ name variants). |
+| `services/persistence.py` | **ISO alpha-2 code → country name.** Reverse lookup used when building human-readable output (e.g., `GB` → "United Kingdom"). Maps all 250 `cca2` codes to their common English name. |
+
+> **Note:** This file is **not** loaded into Cloud Spanner or BigQuery — it is small (250 entries) and loaded into memory at service startup. It does not require periodic refresh unless new sovereign states are recognized.
+
+### 7.5 GeoNames Data Refresh
 
 The GeoNames reference database is refreshed **quarterly** to capture new cities and updated administrative boundaries:
 
@@ -803,7 +842,7 @@ LlmAddressParserAgent ──► litellm.completion() ──► Gemini 2.0 Flash 
 | `sa-dataflow-promote@` | Dataflow Job 2 worker | `dataflow.worker`, `bigquery.dataEditor` (staging + production datasets) |
 | `sa-trigger@` | Cloud Functions trigger | `dataflow.developer`, `storage.objectViewer` (input bucket), `bigquery.dataEditor` (staging.jobs) |
 | `sa-etl@` | GeoNames ETL | `bigquery.dataEditor` (reference dataset), `storage.objectViewer` (reference bucket), `spanner.databaseAdmin` (GeoNames refresh) |
-| `sa-reviewer@` | Data steward (review via Looker Studio) | `bigquery.dataViewer` (staging), `bigquery.dataEditor` (staging.pipeline_results — review_status column only via row-level security) |
+| `sa-reviewer@` | Data steward (spot-check via Looker Studio) | `bigquery.dataViewer` (staging — read-only for spot-checking), `bigquery.dataEditor` (staging.jobs — review_status column only) |
 
 **Principle:** Each service has its own service account with minimum required permissions. No shared service accounts. No `roles/editor` or `roles/owner`.
 
